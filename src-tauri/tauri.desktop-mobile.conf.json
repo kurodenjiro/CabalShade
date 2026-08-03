@@ -3,5 +3,17 @@
     "beforeDevCommand": "npm run dev:mobile",
     "beforeBuildCommand": "npm run build:mobile",
     "frontendDist": "../dist-mobile"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "CabalMesh",
+        "width": 390,
+        "height": 844,
+        "resizable": false,
+        "maximizable": false,
+        "fullscreen": false
+      }
+    ]
   }
 }
