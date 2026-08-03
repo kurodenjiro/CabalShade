@@ -686,6 +686,7 @@ pub async fn settle_intent(
     // an await inside the spawned task — that would make the future !Send.
     let bridge = services.bridge.clone();
     let intents = services.intents.clone();
+    let mesh = services.mesh.clone();
 
     tauri::async_runtime::spawn(async move {
         // Sends a log line unless cancelled or the webview is gone.
@@ -708,6 +709,24 @@ pub async fn settle_intent(
             return;
         }
 
+        // The real counterparty: the first connected peer that announced a
+        // Solana wallet address via its signed presence broadcast. Fall back
+        // to a devnet test address when no peer has one — an honest single-node
+        // flow rather than a fabricated multi-party one.
+        let payee = match mesh.as_ref() {
+            Some(handle) => handle
+                .nearby_nodes()
+                .await
+                .ok()
+                .and_then(|peers| {
+                    peers
+                        .into_iter()
+                        .find_map(|peer| peer.wallet)
+                })
+                .unwrap_or_else(|| "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin".to_string()),
+            None => "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin".to_string(),
+        };
+
         // The real on-chain path. The bridge already handles the
         // online (submit via Magic Router) vs offline (sign + queue) split.
         // Map to an owned String up front so the `!Send` `Box<dyn StdError>`
@@ -715,7 +734,7 @@ pub async fn settle_intent(
         let outcome: Result<String, String> = bridge
             .lock()
             .await
-            .settle_on_chain()
+            .settle_on_chain(&payee)
             .await
             .map(|settled| {
                 format!(

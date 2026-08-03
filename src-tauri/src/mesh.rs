@@ -117,11 +117,14 @@ pub struct Peers {
 }
 
 /// What the mesh knows about one connected peer.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct PeerEntry {
     latency_ms: Option<u16>,
     hops: u8,
     transport: Transport,
+    /// The peer's real Solana wallet address, learned from its signed
+    /// "presence" broadcast. Absent until the first such broadcast arrives.
+    wallet: Option<String>,
 }
 
 impl Peers {
@@ -135,6 +138,7 @@ impl Peers {
             latency_ms: None,
             hops,
             transport,
+            wallet: None,
         });
         // A peer that upgrades from relayed to direct keeps its measured
         // latency; only the connection facts change.
@@ -154,6 +158,15 @@ impl Peers {
         }
     }
 
+    /// Records the peer's real Solana wallet address from its signed presence
+    /// broadcast. Ignored for a peer the registry does not know, so a presence
+    /// message cannot invent a connection.
+    fn wallet(&mut self, peer: &PeerId, address: String) {
+        if let Some(entry) = self.by_id.get_mut(peer) {
+            entry.wallet = Some(address);
+        }
+    }
+
     /// The peers as the nodes screen renders them, with deterministic map
     /// placement seeded by peer id (so a node stays put across renders).
     fn summaries(&self) -> Vec<NearbyPeer> {
@@ -164,6 +177,7 @@ impl Peers {
                 latency_ms: entry.latency_ms,
                 hops: entry.hops,
                 transport: entry.transport,
+                wallet: entry.wallet.clone(),
             })
             .collect()
     }
@@ -223,6 +237,28 @@ mod peers_tests {
         let id = peer();
         peers.connected(id, Transport::Mdns);
         assert!(peers.summaries()[0].latency_ms.is_none());
+    }
+
+    #[test]
+    fn a_presence_broadcast_records_the_peer_wallet() {
+        let mut peers = Peers::default();
+        let id = peer();
+        peers.connected(id, Transport::Quic);
+        assert!(peers.summaries()[0].wallet.is_none());
+
+        peers.wallet(&id, "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin".into());
+        assert_eq!(
+            peers.summaries()[0].wallet.as_deref(),
+            Some("9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin")
+        );
+    }
+
+    #[test]
+    fn a_wallet_broadcast_cannot_invent_a_connection() {
+        let mut peers = Peers::default();
+        let unknown = peer();
+        peers.wallet(&unknown, "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin".into());
+        assert!(peers.summaries().is_empty());
     }
 }
 
@@ -536,6 +572,7 @@ impl MeshNetwork {
                                         // not from the payload itself, so it can't be spoofed by the sender.
                                         if let (Some(source), Ok(payload)) = (message.source, serde_json::from_str::<serde_json::Value>(&intent.payload)) {
                                             if let Some(address) = payload.get("address").and_then(|v| v.as_str()) {
+                                                self.peers.wallet(&source, address.to_string());
                                                 let _ = tx.send(MeshEvent::PeerIdentity {
                                                     peer_id: source.to_string(),
                                                     address: address.to_string(),

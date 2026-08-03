@@ -175,7 +175,12 @@ mod tests {
     /// `cargo test --features ts-rs export_bindings --quiet` with
     /// `TS_RS_EXPORT_DIR=src-tauri` so `../../src/types/bindings.ts` resolves
     /// relative to the repo root rather than escaping it.
+    ///
+    /// Gated on the feature: `ts_rs` is an optional dependency, so plain
+    /// `cargo test` (no feature) must still compile the module's other tests
+    /// without it.
     #[test]
+    #[cfg(feature = "ts-rs")]
     fn export_bindings() {
         let cfg = ts_rs::Config::from_env();
         // Domain types from `cabal_core` — exported first so the same-process

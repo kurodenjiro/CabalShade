@@ -831,20 +831,15 @@ impl BlockchainBridge {
         self.send_via_router(&keypair, instruction, "Release escrow").await
     }
 
-    /// Runs the real settlement path: create an escrow to the payee (a nearby
-    /// peer when one is connected, else a devnet test address), then release
-    /// it. The escrow amount comes from the primary wallet's balance so a
-    /// fresh devnet wallet settles honestly rather than failing on empty.
+    /// Runs the real settlement path: create an escrow to `payee`, then
+    /// release it. The escrow amount is a small real amount so a wallet with
+    /// devnet balance settles for real; an empty wallet still submits the tx
+    /// and reports the actual chain error rather than a fabricated success.
     ///
     /// When the RPC is unreachable, `create_escrow` signs offline and queues
     /// the transaction for mesh relay; that path surfaces as an error here so
     /// the caller reports it honestly.
-    pub async fn settle_on_chain(&self) -> Result<SettledEscrow, Box<dyn Error>> {
-        // The payee: a devnet test address. A real counterparty integration
-        // (the mesh peer who matched the intent) is a separate ticket; this
-        // keeps the on-chain escrow path real even in the single-node flow.
-        let payee = "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin";
-
+    pub async fn settle_on_chain(&self, payee: &str) -> Result<SettledEscrow, Box<dyn Error>> {
         // A small real amount — 0.0001 SOL. A real wallet with real devnet
         // balance settles for real; an empty wallet still submits the tx and
         // reports the actual chain error rather than a fabricated success.

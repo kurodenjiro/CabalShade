@@ -82,6 +82,9 @@ pub struct NearbyPeer {
     pub hops: u8,
     /// How the connection was established.
     pub transport: Transport,
+    /// The peer's real Solana wallet address, learned from its signed
+    /// "presence" broadcast. Absent until the first such broadcast arrives.
+    pub wallet: Option<String>,
 }
 
 /// How a peer is currently connected. `Copy` and cheap so it can live in the
@@ -263,6 +266,7 @@ mod tests {
                             latency_ms: Some(41),
                             hops: 1,
                             transport: Transport::Quic,
+                            wallet: None,
                         }]);
                     }
                 }
