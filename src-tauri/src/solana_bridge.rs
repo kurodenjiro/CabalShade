@@ -1046,4 +1046,74 @@ mod tests {
         let decoded = keypair_from_secret(&encoded).unwrap();
         assert_eq!(decoded.pubkey(), keypair.pubkey());
     }
+
+    /// The load-bearing invariant of the wallet backup feature: what
+    /// `generate_new_identity` stores (base58 of the mnemonic-derived keypair)
+    /// is exactly what `import_mnemonic` reconstructs from the words, so
+    /// "write down the words, type them back later" restores the same wallet.
+    #[test]
+    fn a_generated_identity_round_trips_through_its_mnemonic() {
+        // Generate the way the bridge does: mnemonic -> seed -> keypair.
+        let mnemonic = crate::mnemonic::Mnemonic::generate();
+        let keypair = mnemonic.to_keypair().unwrap();
+        let stored = bs58::encode(keypair.to_bytes()).into_string();
+
+        // Import the way import_mnemonic does: words -> seed -> keypair.
+        let parsed = crate::mnemonic::Mnemonic::parse(&mnemonic.words().join(" ")).unwrap();
+        let imported_keypair = parsed.to_keypair().unwrap();
+
+        // Both the base58 keypair and the derived address match.
+        assert_eq!(keypair_from_secret(&stored).unwrap().pubkey(), imported_keypair.pubkey());
+        assert_eq!(keypair.pubkey(), imported_keypair.pubkey());
+    }
+
+    /// The stored mnemonic is the recoverable form of the stored key: loading
+    /// the identity back and deriving from its phrase reproduces its address.
+    #[test]
+    fn the_stored_mnemonic_derives_the_stored_keypair() {
+        let mnemonic = crate::mnemonic::Mnemonic::generate();
+        let keypair = mnemonic.to_keypair().unwrap();
+
+        let record = IdentityRecord {
+            alias: "Genesis Fox".into(),
+            emoji: "🦊".into(),
+            private_key_hex: bs58::encode(keypair.to_bytes()).into_string().into(),
+            mnemonic: mnemonic.words().join(" ").into(),
+        };
+
+        let from_key = keypair_from_secret(record.private_key_hex.expose()).unwrap();
+        let from_words = crate::mnemonic::Mnemonic::parse(record.mnemonic.expose())
+            .unwrap()
+            .to_keypair()
+            .unwrap();
+        assert_eq!(from_key.pubkey(), from_words.pubkey());
+    }
+
+    /// A key-only import (no mnemonic) still yields a working identity; the
+    /// missing phrase is stored empty so the UI can say "no backup".
+    #[test]
+    fn a_key_only_import_works_but_has_no_phrase() {
+        use tempfile::TempDir;
+
+        let mnemonic = crate::mnemonic::Mnemonic::generate();
+        let keypair = mnemonic.to_keypair().unwrap();
+        let key = bs58::encode(keypair.to_bytes()).into_string();
+
+        // Point the whole bridge at a throwaway data dir so the real vault is
+        // never read or written by a test.
+        let dir = TempDir::new().unwrap();
+        let mut bridge = BlockchainBridge::new(None);
+        bridge.storage_path = dir.path().join("snapshot.enc");
+        bridge.identity_vault = Vault::new(
+            dir.path().join("vault.enc"),
+            crate::vault_key::platform_provider(dir.path().join("vault.key")),
+        );
+        bridge.relay_boost_path = dir.path().join("relay_boost.json");
+
+        bridge
+            .import_identity(key, "Imported".into(), "🦊".into())
+            .unwrap();
+        assert_eq!(bridge.primary_mnemonic(), None);
+        assert_eq!(bridge.get_primary_address(), keypair.pubkey().to_string());
+    }
 }
