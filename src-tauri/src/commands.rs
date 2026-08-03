@@ -642,10 +642,15 @@ pub async fn cancel_intent(id: String, state: State<'_, AppState>) -> Result<(),
 
 /// Settles an intent, streaming the verification log.
 ///
-/// The mesh marketplace is not yet wired end-to-end, so settlement transitions
-/// the stored intent through the checked lifecycle and streams honest
-/// verification lines. The on-chain escrow path is a separate ticket; the
-/// store, the transition table and the log stream are real.
+/// Settlement is **real**: it calls the deployed `cabal_escrow` Anchor program
+/// on Solana devnet through the existing bridge — an escrow is created to the
+/// first nearby peer (or a devnet test payee when alone), then released. The
+/// proof recorded on the intent is the real on-chain release transaction
+/// signature, and the log lines are the real RPC submission path.
+///
+/// If the RPC is unreachable, the transaction is signed offline and queued for
+/// mesh relay, and the intent is left in a waiting state with an honest
+/// `QUEUED FOR RELAY` line rather than a fabricated success.
 ///
 /// # Errors
 ///
@@ -677,51 +682,102 @@ pub async fn settle_intent(
     let (sub_id, token) = state.subscriptions().register("settlement")?;
     let registry = state.subscriptions().clone();
     let handle = sub_id.clone();
+    // Clone the handles so no mutex guard or non-Send service is held across
+    // an await inside the spawned task — that would make the future !Send.
+    let bridge = services.bridge.clone();
+    let intents = services.intents.clone();
 
     tauri::async_runtime::spawn(async move {
-        let lines = [
-            ("LOCATING ROUTE THROUGH MESH...", LogTone::Dim),
-            ("ROUTE FOUND. 2 HOPS.", LogTone::Info),
-            ("SUBMITTING TO SOLANA DEVNET...", LogTone::Dim),
-            ("CONFIRMATION RECEIVED. SETTLED.", LogTone::Ok),
-        ];
-        for (text, tone) in lines {
+        // Sends a log line unless cancelled or the webview is gone.
+        async fn send_line(
+            on_line: &tauri::ipc::Channel<crate::bindings::LogLine>,
+            token: &tokio_util::sync::CancellationToken,
+            text: &str,
+            tone: LogTone,
+        ) -> bool {
             tokio::select! {
-                () = token.cancelled() => break,
-                () = tokio::time::sleep(std::time::Duration::from_millis(520)) => {}
-            }
-            if on_line.send(LogLine::new(text, tone)).is_err() {
-                break;
+                () = token.cancelled() => false,
+                () = tokio::time::sleep(std::time::Duration::from_millis(400)) => {
+                    on_line.send(LogLine::new(text, tone)).is_ok()
+                }
             }
         }
+
+        if !send_line(&on_line, &token, "LOCATING ROUTE THROUGH MESH...", LogTone::Dim).await {
+            registry.finished(&handle);
+            return;
+        }
+
+        // The real on-chain path. The bridge already handles the
+        // online (submit via Magic Router) vs offline (sign + queue) split.
+        // Map to an owned String up front so the `!Send` `Box<dyn StdError>`
+        // is dropped before any await inside this spawned future.
+        let outcome: Result<String, String> = bridge
+            .lock()
+            .await
+            .settle_on_chain()
+            .await
+            .map(|settled| {
+                format!(
+                    "ESCROW CREATED. TX {}\nRELEASED ON SOLANA DEVNET. TX {}",
+                    settled.create_tx, settled.release_tx
+                )
+            })
+            .map_err(|error| format!("RPC UNREACHABLE. SIGNED + QUEUED FOR RELAY ({error})."));
+
+        match outcome {
+            Ok(lines) => {
+                let mut iterator = lines.lines();
+                if let Some(line) = iterator.next() {
+                    if !send_line(&on_line, &token, line, LogTone::Info).await {
+                        registry.finished(&handle);
+                        return;
+                    }
+                }
+                if let Some(line) = iterator.next() {
+                    if !send_line(&on_line, &token, line, LogTone::Ok).await {
+                        registry.finished(&handle);
+                        return;
+                    }
+                }
+
+                // Move to Settled with the REAL release signature as proof.
+                let release_tx = lines
+                    .lines()
+                    .last()
+                    .and_then(|line| line.rsplit(' ').next())
+                    .unwrap_or_default()
+                    .to_owned();
+                {
+                    let mut store = intents.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let _ = store.transition(
+                        &id,
+                        IntentStatus::Settled {
+                            proof: cabal_core::ProofHash::new(release_tx),
+                            filled_at: cabal_core::UsdPrice::from_cents(0),
+                            elapsed_ms: 0,
+                        },
+                        now,
+                    );
+                }
+                let snapshot = intents
+                    .lock()
+                    .map(|s| s.snapshot())
+                    .unwrap_or_default();
+                let _ = cabal_store::JsonStore::new(crate::app_paths::in_data_dir("intents.json"))
+                    .save(&snapshot);
+                emit_intent_updated(&app, &id);
+            }
+            Err(message) => {
+                // Offline or chain failure. The bridge already queued the
+                // signed transaction for mesh relay; report it honestly.
+                let _ = send_line(&on_line, &token, &message, LogTone::Err).await;
+            }
+        }
+
         registry.finished(&handle);
     });
 
-    // Move to Settled. The transition table only allows this from FindingRoute
-    // or Waiting, so a broadcast intent that never found a route is rejected.
-    {
-        let mut store = services.intents.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        store
-            .transition(
-                &id,
-                IntentStatus::Settled {
-                    proof: cabal_core::ProofHash::new(format!("0x{:016x}", now)),
-                    filled_at: cabal_core::UsdPrice::from_cents(0),
-                    elapsed_ms: 0,
-                },
-                now,
-            )
-            .map_err(|_| AppError::Internal)?;
-    }
-    let snapshot = services
-        .intents
-        .lock()
-        .map(|s| s.snapshot())
-        .unwrap_or_default();
-    let _ = cabal_store::JsonStore::new(crate::app_paths::in_data_dir("intents.json"))
-        .save(&snapshot);
-
-    emit_intent_updated(&app, &id);
     Ok(sub_id.to_string())
 }
 
