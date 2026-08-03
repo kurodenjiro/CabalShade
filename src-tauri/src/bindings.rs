@@ -200,6 +200,8 @@ mod tests {
         crate::commands::NodeSummary::export_all(&cfg)
             .expect("could not export NodeSummary");
         crate::commands::IntentView::export_all(&cfg).expect("could not export IntentView");
+        crate::commands::IntentDetail::export_all(&cfg)
+            .expect("could not export IntentDetail");
         crate::commands::IntentFilter::export_all(&cfg)
             .expect("could not export IntentFilter");
         crate::commands::FormOptions::export_all(&cfg)

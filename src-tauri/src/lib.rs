@@ -177,6 +177,18 @@ pub fn run() {
 
                 let bridge = Arc::new(Mutex::new(BlockchainBridge::new(Some(rpc_url))));
 
+                // The intent ledger, restored from the last run. `load_or`
+                // treats a corrupt file as absent — these are user-composed
+                // intents, replaceable, not a wallet.
+                let intents = Arc::new(std::sync::Mutex::new({
+                    let store = cabal_store::JsonStore::new(
+                        crate::app_paths::in_data_dir("intents.json"),
+                    );
+                    let mut intent_store = cabal_core::IntentStore::new();
+                    intent_store.restore(store.load_or(intent_store.snapshot()));
+                    intent_store
+                }));
+
                 // 1. Phase 1
                 SystemBootstrap::phase_1_sync(&bridge, &app_handle).await;
 
@@ -213,6 +225,7 @@ pub fn run() {
                             ollama: ollama_state,
                             bridge,
                             relay_bytes,
+                            intents,
                         });
 
                         // Only once the mesh is actually participating. The
@@ -235,6 +248,7 @@ pub fn run() {
                             ollama: ollama_state,
                             bridge,
                             relay_bytes: Arc::new(AtomicU64::new(0)),
+                            intents,
                         });
                     }
                 }
@@ -269,6 +283,11 @@ pub fn run() {
                     commands::vault_keys,
                     commands::profile_summary,
                     commands::set_offline_mode,
+                    commands::broadcast_intent,
+                    commands::get_intent,
+                    commands::cancel_intent,
+                    commands::settle_intent,
+                    commands::vault_total,
                     app_initializer::kill_switch,
             legacy::send_intent_to_mesh,
             legacy::analyze_pdf_content,
@@ -325,7 +344,7 @@ pub fn run() {
             {
                 // Mobile gets the reshaped surface only. Screen commands join
                 // it as their screens land.
-                tauri::generate_handler![commands::unsubscribe, commands::session_status, commands::enter_mesh, commands::mesh_snapshot, commands::subscribe_mesh_log, commands::list_nearby_nodes, commands::list_intents, commands::intent_form_options, commands::preview_intent, commands::vault_assets, commands::vault_identities, commands::vault_keys, commands::profile_summary, commands::set_offline_mode]
+                tauri::generate_handler![commands::unsubscribe, commands::session_status, commands::enter_mesh, commands::mesh_snapshot, commands::subscribe_mesh_log, commands::list_nearby_nodes, commands::list_intents, commands::intent_form_options, commands::preview_intent, commands::vault_assets, commands::vault_identities, commands::vault_keys, commands::profile_summary, commands::set_offline_mode, commands::broadcast_intent, commands::get_intent, commands::cancel_intent, commands::settle_intent, commands::vault_total]
             }
         })
         .build(tauri::generate_context!())

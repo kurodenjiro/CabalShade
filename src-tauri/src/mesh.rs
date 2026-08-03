@@ -1,12 +1,14 @@
+use crate::mesh_handle::{NearbyPeer, Transport};
 use futures::StreamExt;
 use libp2p::swarm::behaviour::toggle::Toggle;
 use libp2p::{
     dcutr, gossipsub, identify, mdns, noise, ping, relay,
     swarm::{NetworkBehaviour, SwarmEvent},
-    tcp, yamux, Swarm, SwarmBuilder,
+    tcp, yamux, PeerId, Swarm, SwarmBuilder,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
+use std::collections::HashMap;
 use std::error::Error;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::AtomicU64;
@@ -98,6 +100,130 @@ pub struct MeshNetwork {
     /// with the Tauri command layer so Relay Mode can show actual traffic
     /// instead of a simulated number.
     pub relay_bytes: Arc<AtomicU64>,
+    /// What the mesh actually knows about each connected peer. Populated from
+    /// swarm connection events and the ping behaviour — never fabricated.
+    pub peers: Peers,
+}
+
+/// The peer registry: real connected peers and what we know about each.
+///
+/// This is the honest replacement for the fabricated rows `list_nearby_nodes`
+/// used to produce. A peer appears here only when the swarm reports a
+/// connection to it, and leaves when the connection closes. `latency_ms` is
+/// filled by the first ping round-trip and refreshed on every ping.
+#[derive(Debug, Default)]
+pub struct Peers {
+    by_id: HashMap<PeerId, PeerEntry>,
+}
+
+/// What the mesh knows about one connected peer.
+#[derive(Debug, Clone, Copy)]
+struct PeerEntry {
+    latency_ms: Option<u16>,
+    hops: u8,
+    transport: Transport,
+}
+
+impl Peers {
+    /// Records a new connection, or refreshes an existing entry.
+    fn connected(&mut self, peer: PeerId, transport: Transport) {
+        let hops = match transport {
+            Transport::Relayed => 2,
+            Transport::Mdns | Transport::Quic => 1,
+        };
+        let entry = self.by_id.entry(peer).or_insert(PeerEntry {
+            latency_ms: None,
+            hops,
+            transport,
+        });
+        // A peer that upgrades from relayed to direct keeps its measured
+        // latency; only the connection facts change.
+        entry.hops = hops;
+        entry.transport = transport;
+    }
+
+    /// Drops a peer whose connection closed. Idempotent.
+    fn disconnected(&mut self, peer: &PeerId) {
+        self.by_id.remove(peer);
+    }
+
+    /// Records a ping round-trip time.
+    fn ping(&mut self, peer: &PeerId, rtt: Duration) {
+        if let Some(entry) = self.by_id.get_mut(peer) {
+            entry.latency_ms = Some(rtt.as_millis().clamp(0, u16::MAX as u128) as u16);
+        }
+    }
+
+    /// The peers as the nodes screen renders them, with deterministic map
+    /// placement seeded by peer id (so a node stays put across renders).
+    fn summaries(&self) -> Vec<NearbyPeer> {
+        self.by_id
+            .iter()
+            .map(|(peer, entry)| NearbyPeer {
+                id: cabal_core::NodeId::new(peer.to_string()).truncated(),
+                latency_ms: entry.latency_ms,
+                hops: entry.hops,
+                transport: entry.transport,
+            })
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod peers_tests {
+    use super::*;
+
+    /// A fresh peer id. Each call returns a different peer, which is all the
+    /// registry cares about — it keys on `PeerId`, never on anything inside.
+    fn peer() -> PeerId {
+        let keypair = libp2p::identity::Keypair::generate_ed25519();
+        keypair.public().to_peer_id()
+    }
+
+    #[test]
+    fn a_connected_peer_appears_in_summaries() {
+        let mut peers = Peers::default();
+        let id = peer();
+        peers.connected(id, Transport::Quic);
+        let summaries = peers.summaries();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].hops, 1);
+        assert!(summaries[0].latency_ms.is_none());
+    }
+
+    #[test]
+    fn a_disconnected_peer_is_dropped() {
+        let mut peers = Peers::default();
+        let id = peer();
+        peers.connected(id, Transport::Quic);
+        peers.disconnected(&id);
+        assert!(peers.summaries().is_empty());
+    }
+
+    #[test]
+    fn ping_records_latency() {
+        let mut peers = Peers::default();
+        let id = peer();
+        peers.connected(id, Transport::Quic);
+        peers.ping(&id, Duration::from_millis(41));
+        assert_eq!(peers.summaries()[0].latency_ms, Some(41));
+    }
+
+    #[test]
+    fn relayed_peers_report_more_hops() {
+        let mut peers = Peers::default();
+        let id = peer();
+        peers.connected(id, Transport::Relayed);
+        assert_eq!(peers.summaries()[0].hops, 2);
+    }
+
+    #[test]
+    fn a_peer_without_ping_reports_no_latency() {
+        let mut peers = Peers::default();
+        let id = peer();
+        peers.connected(id, Transport::Mdns);
+        assert!(peers.summaries()[0].latency_ms.is_none());
+    }
 }
 
 /// The DNS resolver the swarm should use, read from the system where possible.
@@ -210,7 +336,12 @@ impl MeshNetwork {
             .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
             .build();
 
-        Ok(MeshNetwork { swarm, topic, relay_bytes: Arc::new(AtomicU64::new(0)) })
+        Ok(MeshNetwork {
+            swarm,
+            topic,
+            relay_bytes: Arc::new(AtomicU64::new(0)),
+            peers: Peers::default(),
+        })
     }
 
     /// The swarm event loop. Everything the mesh logs happens inside this span,
@@ -291,6 +422,14 @@ impl MeshNetwork {
                             let _ = reply.send(outcome.map_err(|_| MeshError::Publish));
                             continue;
                         }
+                        MeshCommand::NearbyNodes { reply } => {
+                            // Real connected peers from the registry — the
+                            // replacement for the fabricated rows this used to
+                            // produce. Positions/pulse are added at the command
+                            // layer, seeded by peer id.
+                            let _ = reply.send(self.peers.summaries());
+                            continue;
+                        }
                     }
                 }
 
@@ -302,7 +441,28 @@ impl MeshNetwork {
                             listening_on.push(address.to_string());
                             let _ = tx.send(MeshEvent::ListeningStarted { address: address.to_string() });
                         }
+                        SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
+                            // A relayed connection is a `Relayed` endpoint. Any
+                            // other (dialled or listened) direct transport is
+                            // either QUIC or TCP — both count as direct.
+                            let transport = if endpoint.is_relayed() {
+                                Transport::Relayed
+                            } else {
+                                Transport::Quic
+                            };
+                            self.peers.connected(peer_id, transport);
+                            tracing::info!(peer_id = %peer_id, ?transport, "connection established");
+                        }
+                        SwarmEvent::ConnectionClosed { peer_id, .. } => {
+                            self.peers.disconnected(&peer_id);
+                            tracing::info!(peer_id = %peer_id, "connection closed");
+                        }
                         SwarmEvent::Behaviour(event) => match event {
+                            MeshBehaviourEvent::Ping(ping_event) => {
+                                if let Ok(rtt) = ping_event.result {
+                                    self.peers.ping(&ping_event.peer, rtt);
+                                }
+                            }
                             MeshBehaviourEvent::Mdns(mdns::Event::Discovered(list)) => {
                                 for (peer_id, multiaddr) in list {
                                     tracing::info!(peer_id = %peer_id, address = %multiaddr, "peer discovered");

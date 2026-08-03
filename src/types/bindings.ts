@@ -23,6 +23,46 @@ export type FailureReason = "no_route" | "node_failure" | "condition_unmet" | "s
 export type FormOptions = { actions: Array<string>, assets: Array<AssetOption>, conditions: Array<string>, modes: Array<ModeOption>, privacyLevels: Array<string>, };
 
 /**
+ * An intent as the detail screen renders it: the list row plus the full
+ * request, so opening a detail never needs a second round trip for the parts
+ * the list already fetched.
+ *
+ * The draft is rendered as formatted strings rather than the raw domain type:
+ * a `TokenAmount`'s `u128` does not survive a JS number, and the boundary rule
+ * is that numbers are formatted once, in Rust.
+ */
+export type IntentDetail = { 
+/**
+ * The list-row view, nested so its `amount` does not collide with the
+ * detail's own formatted fields.
+ */
+view: IntentView, 
+/**
+ * The composed action, e.g. `BUY`.
+ */
+action: string, 
+/**
+ * The asset, e.g. `SOL`.
+ */
+asset: string, 
+/**
+ * The condition as a sentence, e.g. `UNDER $95.00`.
+ */
+condition: string, 
+/**
+ * The amount with its asset, e.g. `10 SOL`.
+ */
+amount: string, 
+/**
+ * The execution mode label, e.g. `SHARK MODE`.
+ */
+mode: string, 
+/**
+ * The privacy level, e.g. `MEDIUM`.
+ */
+privacy: string, };
+
+/**
  * Which slice of the list to return.
  */
 export type IntentFilter = "ACTIVE" | "PENDING" | "HISTORY";

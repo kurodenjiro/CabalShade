@@ -1,4 +1,7 @@
+import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { Button, Logo } from "../ds";
+import type { SessionStatus } from "../types/bindings";
 
 /**
  * First screen. Two offers, no chrome.
@@ -6,8 +9,35 @@ import { Button, Logo } from "../ds";
  * Copy is the board's, verbatim: impersonal, present tense, fragments ending in
  * full stops. "ZERO IDENTITY. PRIVATE INTENTS." is three statements, not a
  * tagline to be softened.
+ *
+ * The offers are gated on the **real** session state from `session_status`:
+ * ENTER THE MESH is disabled until bootstrap completes, and the node id shows
+ * once one exists — no more offering a join the app cannot perform yet.
  */
 export function Splash({ onEnter }: { onEnter: () => void }) {
+  const [status, setStatus] = useState<SessionStatus | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const poll = () => {
+      invoke<SessionStatus>("session_status")
+        .then((next) => {
+          if (!cancelled) setStatus(next);
+        })
+        .catch(() => {
+          /* not ready renders as disabled */
+        });
+    };
+    poll();
+    const interval = window.setInterval(poll, 2_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, []);
+
+  const ready = status?.ready ?? false;
+
   return (
     <section
       style={{
@@ -52,6 +82,18 @@ export function Splash({ onEnter }: { onEnter: () => void }) {
         Zero identity. Private intents.
       </p>
 
+      {status?.nodeId ? (
+        <p
+          style={{
+            fontFamily: "var(--type-data-family)",
+            fontSize: "var(--text-2xs)",
+            color: "var(--text-secondary)",
+          }}
+        >
+          NODE {status.nodeId}
+        </p>
+      ) : null}
+
       <div
         style={{
           display: "flex",
@@ -64,8 +106,8 @@ export function Splash({ onEnter }: { onEnter: () => void }) {
           marginTop: "var(--space-8)",
         }}
       >
-        <Button tone="primary" size="lg" block className="cm-touch" onClick={onEnter}>
-          ENTER THE MESH
+        <Button tone="primary" size="lg" block className="cm-touch" disabled={!ready} onClick={onEnter}>
+          {ready ? "ENTER THE MESH" : "CONNECTING..."}
         </Button>
         <Button tone="ghost" size="lg" block className="cm-touch" onClick={onEnter}>
           CREATE ANONYMOUS NODE

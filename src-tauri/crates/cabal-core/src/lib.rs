@@ -27,10 +27,12 @@
 
 pub mod ids;
 pub mod intent;
+pub mod intent_store;
 pub mod money;
 
 pub use ids::{IntentId, NodeId, ProofHash, SubscriptionId};
 pub use intent::{
     Action, Condition, ExecutionMode, FailureReason, IntentDraft, IntentStatus, PrivacyLevel,
 };
+pub use intent_store::{IntentStore, IntentStoreError, StoredIntent};
 pub use money::{AmountError, TokenAmount, UsdPrice};

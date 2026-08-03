@@ -6,6 +6,11 @@
 # dependency arrow points inward, toward the domain.
 [workspace]
 members = ["crates/*"]
+# `crates/src/` is not a crate — it is the accidental landing spot for
+# cabal-core's ts-rs output when the bindings test runs without
+# TS_RS_EXPORT_DIR set. Excluding it keeps `cargo test --workspace` from
+# trying to parse a directory that is never a package.
+exclude = ["crates/src"]
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }

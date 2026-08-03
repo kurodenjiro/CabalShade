@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { Badge, Button, Panel, StatusDot } from "../ds";
 import type { IntentTab } from "../shell/screen";
 import type { IntentView } from "../types/bindings";
@@ -40,6 +41,12 @@ export function Intents({
 }) {
   const [intents, setIntents] = useState<IntentView[] | null>(null);
 
+  const fetchIntents = () => {
+    invoke<IntentView[]>("list_intents", { filter: tab })
+      .then((next) => setIntents(next))
+      .catch(() => setIntents([]));
+  };
+
   useEffect(() => {
     let cancelled = false;
     invoke<IntentView[]>("list_intents", { filter: tab })
@@ -51,6 +58,22 @@ export function Intents({
       });
     return () => {
       cancelled = true;
+    };
+  }, [tab]);
+
+  // Refresh when Rust emits `intent-updated` (broadcast / cancel / settle), so
+  // the list tracks real transitions without polling.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    listen("intent-updated", fetchIntents)
+      .then((fn) => {
+        unlisten = fn;
+      })
+      .catch(() => {
+        /* event bus unavailable: the tab refetch still covers it */
+      });
+    return () => {
+      if (unlisten) unlisten();
     };
   }, [tab]);
 

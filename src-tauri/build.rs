@@ -30,6 +30,12 @@ const COMMANDS: &[&str] = &[
     "vault_keys",
     "profile_summary",
     "set_offline_mode",
+    // intent lifecycle
+    "broadcast_intent",
+    "get_intent",
+    "cancel_intent",
+    "settle_intent",
+    "vault_total",
     // mesh
     "send_intent_to_mesh",
     "get_relay_stats",

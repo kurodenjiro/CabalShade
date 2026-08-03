@@ -24,6 +24,11 @@
     "allow-vault-identities",
     "allow-vault-keys",
     "allow-profile-summary",
-    "allow-set-offline-mode"
+    "allow-set-offline-mode",
+    "allow-broadcast-intent",
+    "allow-get-intent",
+    "allow-cancel-intent",
+    "allow-settle-intent",
+    "allow-vault-total"
   ]
 }

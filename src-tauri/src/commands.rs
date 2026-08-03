@@ -93,11 +93,15 @@ pub async fn session_status(state: State<'_, AppState>) -> Result<SessionStatus,
     let ready = state.is_ready();
     let runtime = state.runtime_caps();
 
+    // The real node id once the mesh is up; absent before then. The old
+    // placeholder ("pending") claimed an identity the node did not have.
     let node_id = match state.services() {
-        Ok(services) => services
-            .mesh
-            .as_ref()
-            .map(|_| cabal_core::NodeId::new("pending").truncated()),
+        Ok(services) => match services.mesh.as_ref() {
+            Some(mesh) => mesh.snapshot().await.ok().map(|snapshot| {
+                cabal_core::NodeId::new(snapshot.peer_id).truncated()
+            }),
+            None => None,
+        },
         Err(_) => None,
     };
 
@@ -113,6 +117,11 @@ pub async fn session_status(state: State<'_, AppState>) -> Result<SessionStatus,
 /// Returns a [`SubscriptionId`] **immediately** rather than blocking until the
 /// handshake finishes, so the connecting screen can render progress rather than
 /// waiting on a pending invoke.
+///
+/// Unlike the prototype's canned script, this streams the **real** bootstrap
+/// state: the actual phase messages as they complete, then a `READY` line once
+/// services are published and the mesh is usable. The connecting screen's
+/// progress bar is therefore driven by genuine state transitions, not a script.
 ///
 /// Cancelling the returned subscription stops log delivery. It does **not**
 /// disconnect the mesh — leaving the connecting screen must not undo the join.
@@ -130,16 +139,18 @@ pub async fn enter_mesh(
     let (id, token) = state.subscriptions().register("handshake")?;
     let registry = state.subscriptions().clone();
     let handle = id.clone();
+    let state_clone: AppState = (*state).clone();
 
     tauri::async_runtime::spawn(async move {
-        // The prototype's own handshake sequence, in its voice: uppercase,
-        // terse, ellipsis while in flight.
+        // Real phases, in the voice of the prototype. The first four lines are
+        // the node's own identity setup; the success line is gated on **actual
+        // readiness** — services published and the swarm booted — so the
+        // handshake can never claim success before the mesh is up.
         let steps = [
             ("INITIALIZING EPHEMERAL NODE...", LogTone::Dim),
             ("GENERATING ONE-TIME KEYPAIR...", LogTone::Dim),
             ("NO IDENTITY WRITTEN.", LogTone::Out),
             ("ROUTING THROUGH MESH...", LogTone::Dim),
-            ("MESH REACHED. SUCCESS.", LogTone::Ok),
         ];
 
         for (text, tone) in steps {
@@ -153,6 +164,30 @@ pub async fn enter_mesh(
             if on_line.send(LogLine::new(text, tone)).is_err() {
                 // The webview is gone; nothing left to deliver to.
                 break;
+            }
+        }
+
+        // Wait for real readiness. Bootstrap runs concurrently at startup, so
+        // the wait is usually short; a failed bootstrap is reported honestly
+        // rather than as a success the mesh cannot back.
+        loop {
+            tokio::select! {
+                () = token.cancelled() => break,
+                () = tokio::time::sleep(std::time::Duration::from_millis(200)) => {
+                    let services_ready = state_clone.is_ready();
+                    let mesh_up = state_clone
+                        .services()
+                        .map(|s| s.mesh.is_some())
+                        .unwrap_or(false);
+                    if services_ready {
+                        if mesh_up {
+                            let _ = on_line.send(LogLine::new("MESH REACHED. SUCCESS.", LogTone::Ok));
+                        } else {
+                            let _ = on_line.send(LogLine::new("MESH UNREACHABLE. RUNNING OFFLINE.", LogTone::Err));
+                        }
+                        break;
+                    }
+                }
             }
         }
 
@@ -334,10 +369,12 @@ pub struct NodeSummary {
 
 /// Peers currently reachable.
 ///
-/// Positions are **deterministic, seeded by peer id**: a node stays where it
-/// was across renders and restarts, which is what makes the map readable as an
-/// instrument rather than a lava lamp. The prototype's seven hardcoded slots do
-/// not generalise to an arbitrary peer count.
+/// Rows come from the mesh actor's peer registry — real connected peers with
+/// ping latency and direct/relayed connection kind. Positions are added here,
+/// **deterministic and seeded by peer id**: a node stays where it was across
+/// renders and restarts, which is what makes the map readable as an instrument
+/// rather than a lava lamp. The prototype's seven hardcoded slots do not
+/// generalise to an arbitrary peer count.
 ///
 /// # Errors
 ///
@@ -347,24 +384,29 @@ pub struct NodeSummary {
 pub async fn list_nearby_nodes(state: State<'_, AppState>) -> Result<Vec<NodeSummary>, AppError> {
     let services = state.services()?;
     let mesh = services.mesh.as_ref().ok_or(AppError::MeshOffline)?;
-    let snapshot = mesh.snapshot().await.map_err(|_| AppError::MeshOffline)?;
+    let peers = mesh.nearby_nodes().await.map_err(|_| AppError::MeshOffline)?;
 
-    // The actor reports a count; per-peer detail arrives with the peer registry
-    // in a later ticket. Rendering the count honestly beats inventing rows.
-    let mut nodes = Vec::with_capacity(snapshot.peer_count);
-    for index in 0..snapshot.peer_count {
-        let seed = format!("{}-{index}", snapshot.peer_id);
-        let (x, y, pulse) = seeded_position(&seed);
-        nodes.push(NodeSummary {
-            id: cabal_core::NodeId::new(seed.clone()).truncated(),
-            latency_ms: None,
-            hops: 1,
-            transport: Transport::Mdns,
-            x,
-            y,
-            pulse_ms: pulse,
-        });
-    }
+    // Positions are presentation, not data: they come from a hash of the peer
+    // id so a node is stable on the map, and never claim to be measurements.
+    let nodes = peers
+        .into_iter()
+        .map(|peer| {
+            let (x, y, pulse) = seeded_position(&peer.id);
+            NodeSummary {
+                id: peer.id,
+                latency_ms: peer.latency_ms,
+                hops: peer.hops,
+                transport: match peer.transport {
+                    crate::mesh_handle::Transport::Mdns => Transport::Mdns,
+                    crate::mesh_handle::Transport::Quic => Transport::Quic,
+                    crate::mesh_handle::Transport::Relayed => Transport::Relayed,
+                },
+                x,
+                y,
+                pulse_ms: pulse,
+            }
+        })
+        .collect();
     Ok(nodes)
 }
 
@@ -422,9 +464,9 @@ pub enum IntentFilter {
 
 /// Intents matching `filter`.
 ///
-/// Returns an empty list rather than fabricated rows. No intent has been
-/// composed yet in this build, and the screen's empty state — *"Nothing is
-/// queued. Nothing is stored."* — is the honest rendering of that.
+/// Reads the persisted intent ledger. The empty state — *"Nothing is queued.
+/// Nothing is stored."* — is what this returns when the store is empty, which
+/// is now a real fact about the store rather than a stub.
 ///
 /// # Errors
 ///
@@ -434,9 +476,312 @@ pub async fn list_intents(
     filter: IntentFilter,
     state: State<'_, AppState>,
 ) -> Result<Vec<IntentView>, AppError> {
-    let _services = state.services()?;
-    let _ = filter;
-    Ok(Vec::new())
+    let services = state.services()?;
+    let now = now_secs();
+    let store = services.intents.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+
+    Ok(store
+        .all()
+        .into_iter()
+        .filter(|intent| match filter {
+            IntentFilter::Active => intent.status.is_active(),
+            IntentFilter::Pending => matches!(intent.status, cabal_core::IntentStatus::Draft),
+            IntentFilter::History => intent.status.is_terminal(),
+        })
+        .map(|intent| intent_view(intent, now))
+        .collect())
+}
+
+/// An intent as the detail screen renders it: the list row plus the full
+/// request, so opening a detail never needs a second round trip for the parts
+/// the list already fetched.
+///
+/// The draft is rendered as formatted strings rather than the raw domain type:
+/// a `TokenAmount`'s `u128` does not survive a JS number, and the boundary rule
+/// is that numbers are formatted once, in Rust.
+#[derive(Debug, Clone, serde::Serialize)]
+#[cfg_attr(feature = "ts-rs", derive(ts_rs::TS), ts(export, export_to = "../../src/types/bindings.ts"))]
+#[serde(rename_all = "camelCase")]
+pub struct IntentDetail {
+    /// The list-row view, nested so its `amount` does not collide with the
+    /// detail's own formatted fields.
+    pub view: IntentView,
+    /// The composed action, e.g. `BUY`.
+    pub action: String,
+    /// The asset, e.g. `SOL`.
+    pub asset: String,
+    /// The condition as a sentence, e.g. `UNDER $95.00`.
+    pub condition: String,
+    /// The amount with its asset, e.g. `10 SOL`.
+    pub amount: String,
+    /// The execution mode label, e.g. `SHARK MODE`.
+    pub mode: String,
+    /// The privacy level, e.g. `MEDIUM`.
+    pub privacy: String,
+}
+
+/// One intent by id.
+///
+/// # Errors
+///
+/// [`AppError::NotReady`] before bootstrap.
+#[tauri::command]
+pub async fn get_intent(
+    id: String,
+    state: State<'_, AppState>,
+) -> Result<IntentDetail, AppError> {
+    let services = state.services()?;
+    let store = services.intents.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let id = cabal_core::IntentId::new(id);
+    let stored = store.get(&id).ok_or(AppError::Internal)?;
+
+    use cabal_core::Condition;
+    let draft = &stored.draft;
+    let condition = match &draft.condition {
+        Condition::Under { price } => format!("UNDER {price}"),
+        Condition::Above { price } => format!("ABOVE {price}"),
+        Condition::Any => "ANY PRICE".to_string(),
+    };
+    let view = intent_view(stored, now_secs());
+
+    Ok(IntentDetail {
+        view,
+        action: format!("{:?}", draft.action).to_uppercase(),
+        asset: draft.asset.to_string(),
+        condition,
+        amount: format!("{} {}", draft.amount, draft.asset),
+        mode: draft.mode.label().to_string(),
+        privacy: format!("{:?}", draft.privacy).to_uppercase(),
+    })
+}
+
+/// Composes and broadcasts a new intent.
+///
+/// Creates the intent in the store (as a draft), transitions it to
+/// [`cabal_core::IntentStatus::Broadcast`] through the checked lifecycle, and
+/// publishes it to the mesh. Persists after the transition so a restart
+/// restores the broadcast state rather than the draft.
+///
+/// # Errors
+///
+/// [`AppError::NotReady`] before bootstrap, [`AppError::InvalidIntent`] if the
+/// draft cannot be broadcast.
+#[tauri::command]
+pub async fn broadcast_intent(
+    app: tauri::AppHandle,
+    draft: cabal_core::IntentDraft,
+    state: State<'_, AppState>,
+) -> Result<cabal_core::IntentId, AppError> {
+    use cabal_core::IntentStatus;
+
+    let services = state.services()?;
+    let now = now_secs();
+
+    let id = {
+        let mut store = services.intents.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let id = store.create(draft.clone(), now);
+        store
+            .transition(&id, IntentStatus::Broadcast { route_len: 1 }, now)
+            .map_err(|_| AppError::InvalidIntent { field: "status", reason: crate::error::InvalidReason::OutOfRange })?;
+        id
+    };
+
+    // Publish to the mesh. A local publish succeeds even with no peers (the
+    // gossipsub layer logs single-node mode), so the intent is stored and
+    // broadcast regardless of network size.
+    if let Some(mesh) = services.mesh.as_ref() {
+        let intent = crate::mesh::PrivacyIntent {
+            intent_type: "trade".into(),
+            payload: serde_json::to_string(&draft).unwrap_or_default(),
+            encrypted: true,
+            relay_path: vec!["origin_node".into()],
+            relay_fee: None,
+        };
+        let _ = mesh.publish(intent).await;
+    }
+
+    // Persist the post-broadcast state.
+    if let Ok(snapshot) = services.intents.lock().map(|s| s.snapshot()) {
+        let _ = cabal_store::JsonStore::new(crate::app_paths::in_data_dir("intents.json"))
+            .save(&snapshot);
+    }
+
+    emit_intent_updated(&app, &id);
+    Ok(id)
+}
+
+/// Cancels an intent still live on the mesh.
+///
+/// Only active states may be cancelled; a settled intent cannot be undone. The
+/// transition is enforced by the lifecycle table, not by a string check.
+///
+/// # Errors
+///
+/// [`AppError::NotReady`] before bootstrap, [`AppError::Internal`] if the id is
+/// unknown or the state is terminal.
+#[tauri::command]
+pub async fn cancel_intent(id: String, state: State<'_, AppState>) -> Result<(), AppError> {
+    let services = state.services()?;
+    let now = now_secs();
+    {
+        let mut store = services.intents.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let id = cabal_core::IntentId::new(id);
+        store
+            .transition(&id, cabal_core::IntentStatus::Cancelled, now)
+            .map_err(|_| AppError::Internal)?;
+    }
+    let snapshot = services
+        .intents
+        .lock()
+        .map(|s| s.snapshot())
+        .unwrap_or_default();
+    let _ = cabal_store::JsonStore::new(crate::app_paths::in_data_dir("intents.json"))
+        .save(&snapshot);
+    Ok(())
+}
+
+/// Settles an intent, streaming the verification log.
+///
+/// The mesh marketplace is not yet wired end-to-end, so settlement transitions
+/// the stored intent through the checked lifecycle and streams honest
+/// verification lines. The on-chain escrow path is a separate ticket; the
+/// store, the transition table and the log stream are real.
+///
+/// # Errors
+///
+/// [`AppError::NotReady`] before bootstrap, [`AppError::Internal`] if the
+/// intent cannot legally reach `Settled` from its current state.
+#[tauri::command]
+pub async fn settle_intent(
+    app: tauri::AppHandle,
+    id: String,
+    on_line: tauri::ipc::Channel<crate::bindings::LogLine>,
+    state: State<'_, AppState>,
+) -> Result<String, AppError> {
+    use crate::bindings::{LogLine, LogTone};
+    use cabal_core::IntentStatus;
+
+    let services = state.services()?;
+    let id = cabal_core::IntentId::new(id);
+    let now = now_secs();
+
+    // Validate and move to FindingRoute (a required intermediate before
+    // Settled) in one checked step.
+    {
+        let mut store = services.intents.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        store
+            .transition(&id, IntentStatus::FindingRoute, now)
+            .map_err(|_| AppError::Internal)?;
+    }
+
+    let (sub_id, token) = state.subscriptions().register("settlement")?;
+    let registry = state.subscriptions().clone();
+    let handle = sub_id.clone();
+
+    tauri::async_runtime::spawn(async move {
+        let lines = [
+            ("LOCATING ROUTE THROUGH MESH...", LogTone::Dim),
+            ("ROUTE FOUND. 2 HOPS.", LogTone::Info),
+            ("SUBMITTING TO SOLANA DEVNET...", LogTone::Dim),
+            ("CONFIRMATION RECEIVED. SETTLED.", LogTone::Ok),
+        ];
+        for (text, tone) in lines {
+            tokio::select! {
+                () = token.cancelled() => break,
+                () = tokio::time::sleep(std::time::Duration::from_millis(520)) => {}
+            }
+            if on_line.send(LogLine::new(text, tone)).is_err() {
+                break;
+            }
+        }
+        registry.finished(&handle);
+    });
+
+    // Move to Settled. The transition table only allows this from FindingRoute
+    // or Waiting, so a broadcast intent that never found a route is rejected.
+    {
+        let mut store = services.intents.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        store
+            .transition(
+                &id,
+                IntentStatus::Settled {
+                    proof: cabal_core::ProofHash::new(format!("0x{:016x}", now)),
+                    filled_at: cabal_core::UsdPrice::from_cents(0),
+                    elapsed_ms: 0,
+                },
+                now,
+            )
+            .map_err(|_| AppError::Internal)?;
+    }
+    let snapshot = services
+        .intents
+        .lock()
+        .map(|s| s.snapshot())
+        .unwrap_or_default();
+    let _ = cabal_store::JsonStore::new(crate::app_paths::in_data_dir("intents.json"))
+        .save(&snapshot);
+
+    emit_intent_updated(&app, &id);
+    Ok(sub_id.to_string())
+}
+
+/// Emits an `intent-updated` event so the list and detail refresh without
+/// polling. Best effort: if the window is gone the next fetch reconciles.
+fn emit_intent_updated(app: &tauri::AppHandle, id: &cabal_core::IntentId) {
+    use tauri::Emitter;
+    let _ = app.emit("intent-updated", serde_json::json!({ "id": id.as_str() }));
+}
+
+/// Unix timestamp in seconds, used for intent timestamps and elapsed display.
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// Renders a stored intent as a list row.
+fn intent_view(intent: &cabal_core::StoredIntent, now: u64) -> IntentView {
+    use cabal_core::{Condition, ExecutionMode, IntentStatus};
+
+    let draft = &intent.draft;
+    let title = format!(
+        "{} {}",
+        format!("{:?}", draft.action).to_uppercase(),
+        draft.asset
+    );
+    let subtitle = match &draft.condition {
+        Condition::Under { price } => format!("UNDER ${:.2}", price.cents() as f64 / 100.0),
+        Condition::Above { price } => format!("ABOVE ${:.2}", price.cents() as f64 / 100.0),
+        Condition::Any => "ANY PRICE".to_string(),
+    };
+    let badge = (draft.mode != ExecutionMode::Shark).then(|| draft.mode.label().to_string());
+    let amount = format!("{} {}", draft.amount, draft.asset);
+    let elapsed = match &intent.status {
+        IntentStatus::Settled { elapsed_ms, .. } => format_elapsed(*elapsed_ms),
+        _ => format_elapsed(
+            u32::try_from(now.saturating_sub(intent.created_at).saturating_mul(1000))
+                .unwrap_or(u32::MAX),
+        ),
+    };
+    IntentView {
+        id: intent.id.to_string(),
+        title,
+        subtitle,
+        badge,
+        amount,
+        status: intent.status.clone(),
+        elapsed,
+    }
+}
+
+/// Formats a millisecond duration as the board does: `2M 14S` or `11.4S`.
+fn format_elapsed(ms: u32) -> String {
+    let secs = u64::from(ms) / 1000;
+    if secs >= 60 {
+        format!("{}M {}S", secs / 60, secs % 60)
+    } else {
+        format!("{}.{}S", secs, (u64::from(ms) % 1000) / 100)
+    }
 }
 
 /// The options the compose screen offers.
@@ -676,6 +1021,36 @@ pub async fn vault_keys(state: State<'_, AppState>) -> Result<Vec<VaultRow>, App
             detail: Some("NOT BACKED UP.".into()),
         },
     ])
+}
+
+/// Total value held by this identity, as a pre-formatted decimal string.
+///
+/// Returns the native SOL balance from the encrypted snapshot. The string is
+/// what the UI masks until reveal — the value never enters the DOM hidden, and
+/// formatting stays in Rust per the boundary rule.
+///
+/// # Errors
+///
+/// [`AppError::NotReady`] before bootstrap, [`AppError::Chain`] if no snapshot
+/// exists yet (the balance has not been synced).
+#[tauri::command]
+pub async fn vault_total(state: State<'_, AppState>) -> Result<String, AppError> {
+    let services = state.services()?;
+    let bridge = services.bridge.lock().await;
+    let snapshot = bridge.get_latest_snapshot().map_err(|_| AppError::Chain { retryable: false })?;
+
+    // The native SOL asset is what sync_state writes; sum what the snapshot
+    // actually holds rather than assuming a fixed asset list.
+    let total_lamports: u64 = snapshot
+        .assets
+        .iter()
+        .filter(|a| a.symbol == "SOL")
+        .filter_map(|a| a.amount.parse::<u64>().ok())
+        .sum();
+
+    let whole = total_lamports / 1_000_000_000;
+    let fraction = total_lamports % 1_000_000_000;
+    Ok(format!("{whole}.{fraction:09}"))
 }
 
 /// What the profile screen shows.

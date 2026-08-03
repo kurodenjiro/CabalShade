@@ -65,6 +65,35 @@ pub enum MeshCommand {
         offline: bool,
         reply: oneshot::Sender<()>,
     },
+    /// Peers currently connected, with whatever the mesh actually knows about
+    /// each one (latency from ping, direct or relayed connection).
+    NearbyNodes { reply: oneshot::Sender<Vec<NearbyPeer>> },
+}
+
+/// One connected peer, as the nodes screen renders it.
+#[derive(Debug, Clone)]
+pub struct NearbyPeer {
+    /// The peer's libp2p peer id, truncated for display.
+    pub id: String,
+    /// Round-trip time from the ping behaviour. Absent before the first ping
+    /// completes — zero is a real value, so absence is the only honest "unknown".
+    pub latency_ms: Option<u16>,
+    /// 1 = direct connection, >1 = relayed.
+    pub hops: u8,
+    /// How the connection was established.
+    pub transport: Transport,
+}
+
+/// How a peer is currently connected. `Copy` and cheap so it can live in the
+/// registry without cloning strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Transport {
+    /// Discovered on the local network and connected directly.
+    Mdns,
+    /// Connected over QUIC (direct, dialled).
+    Quic,
+    /// Reached through a relay — off-LAN, higher latency, more hops.
+    Relayed,
 }
 
 /// What the home screen needs to render mesh status.
@@ -150,6 +179,20 @@ impl MeshHandle {
         answer.await.map_err(|_| MeshError::NoReply)
     }
 
+    /// The peers currently connected, with whatever the mesh knows about each.
+    ///
+    /// # Errors
+    ///
+    /// As [`MeshHandle::publish`].
+    pub async fn nearby_nodes(&self) -> Result<Vec<NearbyPeer>, MeshError> {
+        let (reply, answer) = oneshot::channel();
+        self.tx
+            .send(MeshCommand::NearbyNodes { reply })
+            .await
+            .map_err(|_| MeshError::ActorGone)?;
+        answer.await.map_err(|_| MeshError::NoReply)
+    }
+
     /// Whether the actor is still accepting requests.
     #[must_use]
     pub fn is_running(&self) -> bool {
@@ -214,6 +257,14 @@ mod tests {
                     MeshCommand::SetOffline { reply, .. } => {
                         let _ = reply.send(());
                     }
+                    MeshCommand::NearbyNodes { reply } => {
+                        let _ = reply.send(vec![NearbyPeer {
+                            id: "8A3F..1209".into(),
+                            latency_ms: Some(41),
+                            hops: 1,
+                            transport: Transport::Quic,
+                        }]);
+                    }
                 }
             }
         });
@@ -221,6 +272,9 @@ mod tests {
         assert!(handle.publish(intent()).await.is_ok());
         assert_eq!(handle.snapshot().await.unwrap().peer_count, 3);
         assert!(handle.set_offline(true).await.is_ok());
+        let peers = handle.nearby_nodes().await.unwrap();
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].latency_ms, Some(41));
     }
 
     #[tokio::test]

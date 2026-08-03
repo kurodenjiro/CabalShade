@@ -38,6 +38,7 @@ use crate::matcher::MatchAgent;
 use crate::ollama_manager::OllamaManager;
 use crate::subscriptions::Registry;
 use crate::zk_handler::ZKHandler;
+use cabal_core::IntentStore;
 use serde::Serialize;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, RwLock};
@@ -61,6 +62,9 @@ pub struct Services {
     pub ollama: Arc<OllamaManager>,
     pub bridge: Arc<Mutex<BlockchainBridge>>,
     pub relay_bytes: Arc<AtomicU64>,
+    /// The persisted intent ledger. `std::sync::Mutex` because every critical
+    /// section is a short in-memory mutation — never held across an `.await`.
+    pub intents: Arc<std::sync::Mutex<IntentStore>>,
 }
 
 /// Facts fixed when the binary was compiled. Never change, so `Copy`.

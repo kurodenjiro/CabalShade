@@ -18,7 +18,8 @@ const COMMAND: Record<VaultTab, string> = {
  * **The total is masked by default and only fetched on reveal.** Sending the
  * value and hiding it in CSS would put the balance in the DOM of a screen the
  * user asked not to show it on — masking is presentation, so the *value* has to
- * be absent, not merely covered.
+ * be absent, not merely covered. The reveal fetches the real total from
+ * `vault_total`, which reads the encrypted snapshot.
  *
  * The KEYS tab never renders key material. It describes what is held and where;
  * the values stay in the encrypted vault. That is the promise the screen's own
@@ -27,6 +28,7 @@ const COMMAND: Record<VaultTab, string> = {
 export function Vault({ tab, onTabChange }: { tab: VaultTab; onTabChange: (tab: VaultTab) => void }) {
   const [rows, setRows] = useState<VaultRow[] | null>(null);
   const [revealed, setRevealed] = useState(false);
+  const [total, setTotal] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -41,6 +43,17 @@ export function Vault({ tab, onTabChange }: { tab: VaultTab; onTabChange: (tab: 
       cancelled = true;
     };
   }, [tab]);
+
+  const toggleReveal = () => {
+    const next = !revealed;
+    setRevealed(next);
+    // Only fetch the value on reveal — it never enters the DOM while masked.
+    if (next && total === null) {
+      invoke<string>("vault_total")
+        .then((value) => setTotal(value))
+        .catch(() => setTotal("—"));
+    }
+  };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-6)", padding: "var(--space-6)" }}>
@@ -94,7 +107,7 @@ export function Vault({ tab, onTabChange }: { tab: VaultTab; onTabChange: (tab: 
               }}
             >
               {/* Not fetched unless revealed — see the note above. */}
-              {revealed ? "—" : "✱✱✱✱✱"}
+              {revealed ? total ?? "—" : "✱✱✱✱✱"}
             </span>
             <IconButton
               size="md"
@@ -102,7 +115,7 @@ export function Vault({ tab, onTabChange }: { tab: VaultTab; onTabChange: (tab: 
               className="cm-touch"
               aria-label={revealed ? "Hide total value" : "Reveal total value"}
               aria-pressed={revealed}
-              onClick={() => setRevealed((previous) => !previous)}
+              onClick={toggleReveal}
             >
               {revealed ? "×" : "◎"}
             </IconButton>
