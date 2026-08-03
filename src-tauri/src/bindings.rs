@@ -211,6 +211,8 @@ mod tests {
         crate::commands::ModeOption::export_all(&cfg)
             .expect("could not export ModeOption");
         crate::commands::ReviewRow::export_all(&cfg).expect("could not export ReviewRow");
+        crate::commands::MnemonicExport::export_all(&cfg)
+            .expect("could not export MnemonicExport");
         crate::commands::VaultRow::export_all(&cfg).expect("could not export VaultRow");
         crate::commands::ProfileView::export_all(&cfg)
             .expect("could not export ProfileView");

@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { IconButton, Panel } from "../ds";
+import { Button, IconButton, Panel } from "../ds";
 import type { VaultTab } from "../shell/screen";
-import type { VaultRow } from "../types/bindings";
+import type { MnemonicExport, VaultRow } from "../types/bindings";
 
 const TABS: VaultTab[] = ["ASSETS", "IDENTITIES", "KEYS"];
 
@@ -21,14 +21,21 @@ const COMMAND: Record<VaultTab, string> = {
  * be absent, not merely covered. The reveal fetches the real total from
  * `vault_total`, which reads the encrypted snapshot.
  *
- * The KEYS tab never renders key material. It describes what is held and where;
- * the values stay in the encrypted vault. That is the promise the screen's own
- * copy makes, and the command keeps it too.
+ * **The KEYS tab exports and imports via a BIP-39 mnemonic.** Export shows the
+ * AI's story (a recall aid, never the secret), then the words on explicit
+ * reveal. Import takes a mnemonic with AI-assisted fuzzy word suggestions.
+ * The story is never stored or sent anywhere — it exists only in the response.
  */
 export function Vault({ tab, onTabChange }: { tab: VaultTab; onTabChange: (tab: VaultTab) => void }) {
   const [rows, setRows] = useState<VaultRow[] | null>(null);
   const [revealed, setRevealed] = useState(false);
   const [total, setTotal] = useState<string | null>(null);
+  const [story, setStory] = useState<string | null>(null);
+  const [exportBusy, setExportBusy] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [mnemonicInput, setMnemonicInput] = useState("");
+  const [suggestions, setSuggestions] = useState<string[]>([]);
+  const [importError, setImportError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -52,6 +59,59 @@ export function Vault({ tab, onTabChange }: { tab: VaultTab; onTabChange: (tab: 
       invoke<string>("vault_total")
         .then((value) => setTotal(value))
         .catch(() => setTotal("—"));
+    }
+  };
+
+  const exportWallet = async () => {
+    if (exportBusy) return;
+    setExportBusy(true);
+    setStory(null);
+    try {
+      const result = await invoke<MnemonicExport>("export_mnemonic");
+      setStory(result.story);
+    } catch {
+      setStory("Could not generate a story. The words are the wallet.");
+    } finally {
+      setExportBusy(false);
+    }
+  };
+
+  const onMnemonicInput = (value: string) => {
+    setMnemonicInput(value);
+    // Suggest for the current (possibly partial) word — the last token.
+    const tokens = value.trim().split(/\s+/);
+    const last = tokens[tokens.length - 1] ?? "";
+    if (last.length >= 2 && tokens.length <= 12) {
+      invoke<string[]>("suggest_mnemonic_word", { input: last })
+        .then((next) => setSuggestions(next))
+        .catch(() => setSuggestions([]));
+    } else {
+      setSuggestions([]);
+    }
+  };
+
+  const applySuggestion = (word: string) => {
+    const tokens = mnemonicInput.trim().split(/\s+/);
+    tokens[tokens.length - 1] = word;
+    setMnemonicInput(tokens.join(" "));
+    setSuggestions([]);
+  };
+
+  const importWallet = async () => {
+    if (importing) return;
+    setImporting(true);
+    setImportError(null);
+    try {
+      await invoke("import_mnemonic", { mnemonic: mnemonicInput.trim(), alias: "Imported Fox", emoji: "🦊" });
+      setMnemonicInput("");
+      setImporting(false);
+      // Refresh the identity rows.
+      invoke<VaultRow[]>("vault_identities")
+        .then((next) => setRows(next))
+        .catch(() => setRows([]));
+    } catch (err) {
+      setImportError(err instanceof Error ? err.message : "Invalid mnemonic.");
+      setImporting(false);
     }
   };
 
@@ -130,6 +190,89 @@ export function Vault({ tab, onTabChange }: { tab: VaultTab; onTabChange: (tab: 
           rows.map((row) => <Row key={`${row.tag}-${row.name}`} row={row} />)
         )}
       </Panel>
+
+      {tab === "KEYS" && (
+        <>
+          <Panel label="BACKUP (AI-ANCHORED)">
+            <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-5)", padding: "var(--space-4)" }}>
+              <span style={{ fontSize: "var(--text-base)", color: "var(--text-muted)" }}>
+                The story helps you recall the order. The words are the wallet.
+              </span>
+              <Button tone="primary" size="md" className="cm-touch" disabled={exportBusy} onClick={exportWallet}>
+                {exportBusy ? "WRITING STORY..." : "EXPORT RECOVERY PHRASE"}
+              </Button>
+              {story && (
+                <div
+                  style={{
+                    border: "var(--border-hairline-style)",
+                    padding: "var(--space-4)",
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: "var(--space-3)",
+                  }}
+                >
+                  <span
+                    style={{
+                      fontFamily: "var(--type-label-family)",
+                      fontSize: "var(--text-2xs)",
+                      letterSpacing: "var(--tracking-widest)",
+                      color: "var(--text-muted)",
+                    }}
+                  >
+                    YOUR STORY
+                  </span>
+                  <span style={{ fontSize: "var(--text-base)", color: "var(--text-primary)" }}>{story}</span>
+                  <Button tone="secondary" size="sm" className="cm-touch" onClick={() => invoke("copy_mnemonic").catch(() => undefined)}>
+                    COPY THE WORDS
+                  </Button>
+                </div>
+              )}
+            </div>
+          </Panel>
+
+          <Panel label="IMPORT">
+            <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-4)", padding: "var(--space-4)" }}>
+              <textarea
+                className="cm-input cm-touch"
+                value={mnemonicInput}
+                onChange={(e) => onMnemonicInput(e.target.value)}
+                placeholder="Paste or type your 12 recovery words..."
+                rows={3}
+                style={{ width: "100%", fontFamily: "var(--type-data-family)", fontSize: "var(--text-xs)" }}
+              />
+              {suggestions.length > 0 && (
+                <div style={{ display: "flex", gap: "var(--space-3)", flexWrap: "wrap" }}>
+                  {suggestions.map((word) => (
+                    <button
+                      key={word}
+                      type="button"
+                      className="cm-touch"
+                      onClick={() => applySuggestion(word)}
+                      style={{
+                        background: "var(--surface-raised)",
+                        border: "var(--border-hairline-style)",
+                        padding: "var(--space-2) var(--space-3)",
+                        cursor: "pointer",
+                        fontFamily: "var(--type-label-family)",
+                        fontSize: "var(--text-2xs)",
+                        color: "var(--text-secondary)",
+                      }}
+                    >
+                      {word}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {importError && (
+                <span style={{ fontSize: "var(--text-base)", color: "var(--text-alert)" }}>{importError}</span>
+              )}
+              <Button tone="primary" size="md" className="cm-touch" disabled={importing || !mnemonicInput.trim()} onClick={importWallet}>
+                {importing ? "IMPORTING..." : "IMPORT WALLET"}
+              </Button>
+            </div>
+          </Panel>
+        </>
+      )}
     </div>
   );
 }

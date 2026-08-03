@@ -29,6 +29,10 @@
     "allow-get-intent",
     "allow-cancel-intent",
     "allow-settle-intent",
-    "allow-vault-total"
+    "allow-vault-total",
+    "allow-export-mnemonic",
+    "allow-copy-mnemonic",
+    "allow-import-mnemonic",
+    "allow-suggest-mnemonic-word"
   ]
 }

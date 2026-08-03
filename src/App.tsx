@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { SolanaSettlement } from "./solana-settlement";
+import { weiToAvax } from "./avax-settlement";
 import "./styles.css";
 import skullIcon from "./assets/icons/icon_skull.png";
 
@@ -139,8 +139,8 @@ function App() {
             try {
                 await invoke("sync_blockchain_state", { wallet: "" });
                 const snapshot = await invoke<{ assets: { symbol: string; amount: string }[] } | null>("get_wallet_snapshot");
-                const native = snapshot?.assets?.find((a) => a.symbol === "SOL");
-                setMyBalanceAvax(native ? SolanaSettlement.lamportsToSol(parseFloat(native.amount)) : 0);
+                const native = snapshot?.assets?.find((a) => a.symbol === "AVAX");
+                setMyBalanceAvax(native ? weiToAvax(parseFloat(native.amount)) : 0);
             } catch (e) {
                 console.error("Failed to refresh balance:", e);
             }

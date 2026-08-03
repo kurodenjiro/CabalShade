@@ -12,9 +12,12 @@ pub mod blockchain_bridge;
 pub mod matcher;
 pub mod mesh;
 
-/// Solana + MagicBlock chain backend. `blockchain_bridge` re-exports this so
-/// the frozen desktop surface and its IPC snapshots stay source-compatible.
-pub mod solana_bridge;
+/// Avalanche C-Chain backend. `blockchain_bridge` re-exports this so the
+/// frozen desktop surface and its IPC snapshots stay source-compatible.
+pub mod avax_bridge;
+
+/// BIP-39 mnemonic export/import for the wallet.
+pub mod mnemonic;
 
 /// Request handle onto the mesh actor. See src/mesh_handle.rs.
 pub mod mesh_handle;
@@ -82,6 +85,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         // Registers the JNI handle only. Nothing here is reachable over IPC —
         // see src/multicast.rs for why the webview gets no grant for it.
         .plugin(multicast::init())
@@ -171,8 +175,7 @@ pub fn run() {
                 #[cfg(desktop)]
                 dotenv::dotenv().ok();
 
-                let rpc_url = std::env::var("SOLANA_RPC_URL")
-                    .or_else(|_| std::env::var("AVAX_RPC_URL"))
+                let rpc_url = std::env::var("AVAX_RPC_URL")
                     .unwrap_or_else(|_| blockchain_bridge::DEFAULT_AVAX_RPC_URL.to_string());
 
                 let bridge = Arc::new(Mutex::new(BlockchainBridge::new(Some(rpc_url))));
@@ -288,6 +291,10 @@ pub fn run() {
                     commands::cancel_intent,
                     commands::settle_intent,
                     commands::vault_total,
+                    commands::export_mnemonic,
+                    commands::copy_mnemonic,
+                    commands::import_mnemonic,
+                    commands::suggest_mnemonic_word,
                     app_initializer::kill_switch,
             legacy::send_intent_to_mesh,
             legacy::analyze_pdf_content,
@@ -344,7 +351,7 @@ pub fn run() {
             {
                 // Mobile gets the reshaped surface only. Screen commands join
                 // it as their screens land.
-                tauri::generate_handler![commands::unsubscribe, commands::session_status, commands::enter_mesh, commands::mesh_snapshot, commands::subscribe_mesh_log, commands::list_nearby_nodes, commands::list_intents, commands::intent_form_options, commands::preview_intent, commands::vault_assets, commands::vault_identities, commands::vault_keys, commands::profile_summary, commands::set_offline_mode, commands::broadcast_intent, commands::get_intent, commands::cancel_intent, commands::settle_intent, commands::vault_total]
+                tauri::generate_handler![commands::unsubscribe, commands::session_status, commands::enter_mesh, commands::mesh_snapshot, commands::subscribe_mesh_log, commands::list_nearby_nodes, commands::list_intents, commands::intent_form_options, commands::preview_intent, commands::vault_assets, commands::vault_identities, commands::vault_keys, commands::profile_summary, commands::set_offline_mode, commands::broadcast_intent, commands::get_intent, commands::cancel_intent, commands::settle_intent, commands::vault_total, commands::export_mnemonic, commands::copy_mnemonic, commands::import_mnemonic, commands::suggest_mnemonic_word]
             }
         })
         .build(tauri::generate_context!())

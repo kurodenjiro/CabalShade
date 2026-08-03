@@ -19,7 +19,6 @@
     "ios:sim": "npm run ios:clean-build && tauri ios build --debug --target aarch64-sim"
   },
   "dependencies": {
-    "@solana/web3.js": "^1.95.0",
     "@tauri-apps/api": "2.11.1",
     "@tauri-apps/plugin-opener": "2.5.4",
     "framer-motion": "^12.29.2",

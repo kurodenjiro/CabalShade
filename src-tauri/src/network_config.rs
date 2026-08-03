@@ -23,15 +23,14 @@ use serde::{Deserialize, Serialize};
 /// A chain this app knows how to talk to.
 ///
 /// The variant names are frozen by the IPC contract (the profile screen reads
-/// them), but the endpoints now target Solana + MagicBlock rather than
-/// Avalanche.
+/// them), and the endpoints target the Avalanche C-Chain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Network {
-    /// Solana devnet. The default, deliberately.
+    /// Avalanche Fuji testnet (C-Chain). The default, deliberately.
     #[default]
     Fuji,
-    /// Solana mainnet. Real funds.
+    /// Avalanche mainnet (C-Chain). Real funds.
     Mainnet,
 }
 
@@ -40,8 +39,8 @@ impl Network {
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Fuji => "Solana Devnet",
-            Self::Mainnet => "Solana",
+            Self::Fuji => "Avalanche Fuji",
+            Self::Mainnet => "Avalanche",
         }
     }
 
@@ -58,8 +57,8 @@ impl Network {
     #[must_use]
     pub const fn default_rpc_url(self) -> &'static str {
         match self {
-            Self::Fuji => "https://api.devnet.solana.com",
-            Self::Mainnet => "https://api.mainnet-beta.solana.com",
+            Self::Fuji => "https://api.avax-test.network/ext/bc/C/rpc",
+            Self::Mainnet => "https://api.avax.network/ext/bc/C/rpc",
         }
     }
 
@@ -212,15 +211,16 @@ mod tests {
 
     #[test]
     fn each_network_has_its_own_endpoint() {
-        assert!(Network::Fuji.default_rpc_url().contains("devnet"));
-        assert!(!Network::Mainnet.default_rpc_url().contains("devnet"));
+        assert!(Network::Fuji.default_rpc_url().contains("avax-test"));
+        assert!(!Network::Mainnet.default_rpc_url().contains("avax-test"));
+        assert!(Network::Mainnet.default_rpc_url().contains("avax.network"));
     }
 
     #[test]
     fn absent_config_yields_the_testnet_endpoint() {
         let dir = TempDir::new().unwrap();
         let store = cabal_store::JsonStore::new(dir.path().join("network.json"));
-        assert!(NetworkConfig::load(&store).rpc_url().contains("devnet"));
+        assert!(NetworkConfig::load(&store).rpc_url().contains("avax-test"));
     }
 
     #[test]

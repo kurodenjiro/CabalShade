@@ -36,6 +36,11 @@ const COMMANDS: &[&str] = &[
     "cancel_intent",
     "settle_intent",
     "vault_total",
+    // wallet import/export (AI-anchored mnemonic)
+    "export_mnemonic",
+    "copy_mnemonic",
+    "import_mnemonic",
+    "suggest_mnemonic_word",
     // mesh
     "send_intent_to_mesh",
     "get_relay_stats",

@@ -71,6 +71,12 @@ impl From<&str> for Secret {
     }
 }
 
+impl Default for Secret {
+    fn default() -> Self {
+        Self(String::new())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

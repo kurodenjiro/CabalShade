@@ -127,6 +127,18 @@ nodeId: string,
  */
 uptime: string, connected: boolean, stats: Array<StatTile>, };
 
+/**
+ * What `export_mnemonic` returns: the AI's narrative anchoring the seed
+ * words in order. The mnemonic itself never crosses to the webview here —
+ * the story is the recall aid, and the words are shown only by
+ * `copy_mnemonic`/a dedicated reveal step the user explicitly opens.
+ */
+export type MnemonicExport = { 
+/**
+ * The AI-written story. A memory aid, never part of the secret.
+ */
+story: string, };
+
 export type ModeOption = { label: string, description: string, };
 
 /**
