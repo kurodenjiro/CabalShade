@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "dev:mobile": "vite --mode mobile",
-    "build:mobile": "tsc && vite build --mode mobile",
+    "build:mobile": "tsc -p tsconfig.mobile.json && vite build --mode mobile",
     "preview": "vite preview",
     "tauri": "tauri",
     "ds:unbundle": "python3 scripts/unbundle-ds.py",
