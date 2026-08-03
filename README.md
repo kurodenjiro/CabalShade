@@ -1,8 +1,8 @@
 # CabalMesh
 
-> **The Zero-Identity Autonomous Layer for Mesh-to-Avalanche Private Intents**
+> **The Zero-Identity Autonomous Layer for Mesh-to-Solana Private Intents**
 
-A decentralized, privacy-first infrastructure enabling autonomous AI Agents to negotiate and execute transactions over a physical Mesh Network, settling on the Avalanche C-Chain (Fuji testnet by default).
+A decentralized, privacy-first infrastructure enabling autonomous AI Agents to negotiate and execute transactions over a physical Mesh Network, settling on Solana (devnet by default, via MagicBlock Ephemeral Rollups).
 
 ## 🎥 Demo
 
@@ -17,47 +17,36 @@ In this network, you are a **Nobody**. Every trace—from your physical location
 ### The "Nobody" Stack (Privacy-in-Depth)
 
 1. **The Cloak Layer** (Mesh Networking)
-   - ShadowWire + Libp2p for offline peer-to-peer communication
+   - libp2p for offline peer-to-peer communication (QUIC + TCP, Noise/Yamux)
    - mDNS discovery without internet dependency
    - Multi-hop metadata stripping
+   - Relay + DCUtR hole-punching for off-LAN discovery
 
 2. **The Invisible Brain** (Confidential Computation)
    - Ollama AI Agents with "Shark Mode" aggressive negotiation
-   - Noir ZK-Circuits for privacy-preserving verification
+   - Noir ZK-Circuits for privacy-preserving verification (desktop-only)
    - Confidential Compute (FHE/MPC) integration ready
 
-3. **The Settlement Layer** (Avalanche)
-   - A minimal on-chain `Escrow` contract (Solidity, deployed to Fuji via Hardhat) locks/releases AVAX for a deal
-   - Private Swap for anonymous swaps (interface reserved, not yet integrated)
+3. **The Settlement Layer** (Solana)
+   - An on-chain `cabal_escrow` Anchor program (Solana) locks/releases SOL for a deal
+   - MagicBlock Ephemeral Rollups for instant settlement
    - Instant Session keys for sub-second mesh-side agent authority delegation
 
 ## 🚀 Quick Start
 
 ### Prerequisites
 
-- **Rust** 1.91+ (needed by the `alloy` EVM crate; run `rustup update stable`)
+- **Rust** 1.85+ (`rustup update stable`)
 - **Node.js** 18+
 - **Ollama** (for AI agent) - [Install](https://ollama.ai)
-- **Nargo** (for Noir circuits, optional) - [Install](https://noir-lang.org)
+- **Nargo** (for Noir circuits, optional, desktop) - [Install](https://noir-lang.org)
 
 ### Installation
 
 ```bash
-cd cabalmesh
+cd CabalShade
 npm install
 ```
-
-### Deploy the Escrow contract (once, to Fuji testnet)
-
-```bash
-cd contracts
-npm install
-cp .env.example .env   # fill in PRIVATE_KEY of a Fuji-funded test wallet (faucet: https://faucet.avax.network/)
-npx hardhat compile
-npx hardhat run scripts/deploy.ts --network fuji
-```
-
-This writes the deployed address to `contracts/deployments/fuji.json` and the ABI to `src-tauri/abi/Escrow.abi.json` + `src/abi/Escrow.abi.json`. Copy the deployed address into `src-tauri/.env` as `ESCROW_CONTRACT_ADDRESS` (see `src-tauri/.env.example`).
 
 ### Run Development Server
 
@@ -70,6 +59,15 @@ This will:
 2. Initialize the Rust Tauri backend
 3. Launch the mesh network with mDNS discovery
 4. Open the Nexus UI
+
+### Mobile (iOS / Android)
+
+```bash
+npm run tauri -- ios dev            # named simulator
+npm run tauri -- android dev        # emulator or attached device
+```
+
+The mobile build uses the design-system UI (`src/mobile-entry/`), the desktop build uses the frozen RPG UI (`src/`). ZK proving and the local Ollama agent are desktop-only.
 
 ## 💻 Usage
 
@@ -86,52 +84,57 @@ The main UI displays:
 ### Example Intent
 
 ```
-Buy 10 AVAX under $95 using Shark Mode
+Buy 10 SOL under $95 using Shark Mode
 ```
 
 The system will:
 1. Generate a Noir ZK-proof of your balance
 2. Negotiate via Ollama AI (localhost:11434)
 3. Broadcast encrypted intent to mesh
-4. Settle via the on-chain Escrow contract on Avalanche when online
+4. Settle via the on-chain escrow program on Solana when online
 
 ### Going Offline
 
 1. **Disconnect Wi-Fi** - The Internet LED turns red
 2. **Post Intent** - Data flows through mesh (Mesh LED stays green)
-3. **Reconnect** - Settlement executes on Avalanche
+3. **Reconnect** - Settlement executes on Solana
 
 ## 🔧 Project Structure
 
 ```
-cabalmesh/
-├── src/                          # React frontend
+CabalShade/
+├── src/                          # React frontend (frozen desktop RPG UI)
 │   ├── App.tsx                   # Nexus UI
-│   ├── styles.css                # Tailwind + custom styles
-│   ├── avalanche-settlement.ts   # Read-only Avalanche helper (ethers.js v6)
-│   ├── abi/Escrow.abi.json       # Escrow contract ABI (frontend copy)
-│   └── main.tsx                  # Entry point
-├── src-tauri/                    # Rust backend
-│   └── src/
-│       ├── mesh.rs               # libp2p mesh networking
-│       ├── agent.rs              # Ollama AI integration
-│       ├── zk_handler.rs         # Noir ZK proofs
-│       ├── blockchain_bridge.rs  # Avalanche identity/RPC/Escrow bridge (alloy)
-│       └── lib.rs                # Tauri commands
+│   ├── components/               # UI components
+│   ├── screens/                  # Mobile-style screen shells
+│   ├── ds/                       # Design system (components, tokens)
+│   ├── mobile-entry/             # Mobile UI entry point (separate Vite root)
+│   ├── solana-settlement.ts      # Read-only Solana helper (@solana/web3.js)
+│   └── types/bindings.ts         # Generated ts-rs bindings (do not edit)
+├── src-tauri/                    # Rust backend (Tauri workspace)
+│   ├── src/                      # App crate
+│   │   ├── commands.rs           # Reshaped 28-command surface
+│   │   ├── legacy/               # Frozen 50-command desktop adapter
+│   │   ├── solana_bridge.rs      # Solana identity/RPC/escrow bridge
+│   │   ├── mesh.rs               # libp2p mesh networking
+│   │   └── ...                   # agent, zk_handler, matcher, etc.
+│   ├── crates/                   # Workspace crates
+│   │   ├── cabal-core/           # Domain model (no I/O)
+│   │   ├── cabal-store/          # Atomic JSON persistence
+│   │   └── cabal-vault/          # Encrypted key storage
+│   └── tests/                    # IPC contract + lifecycle tests
+├── anchor-escrow/                # Solana Anchor escrow program
+│   └── programs/cabal-escrow/    # Escrow + MagicBlock Ephemeral Rollup
+├── contracts/                    # Legacy Solidity contracts (Hardhat)
 ├── noir-circuit/                 # Noir ZK circuits
-│   └── src/
-│       └── main.nr               # Bid verification circuit
-├── contracts/                    # Hardhat project
-│   ├── contracts/Escrow.sol      # On-chain escrow contract
-│   ├── scripts/deploy.ts         # Deploys to Fuji, hands off ABI
-│   └── test/Escrow.test.ts       # Contract unit tests
-└── README.md
+│   └── src/main.nr               # Bid verification circuit
+└── docs/                         # Mobile architecture & research docs
 ```
 
 ## 🎨 Key Features
 
 ### 1. Offline Intent Execution
-Post tasks while completely offline. Local mesh agents relay, negotiate, and sign deals, only hitting Avalanche when an internet gateway is reached.
+Post tasks while completely offline. Local mesh agents relay, negotiate, and sign deals, only hitting Solana when an internet gateway is reached.
 
 ### 2. Verifiable Aggression
 Noir proofs ensure your AI agent followed your "Aggressive" strategy without cheating or leaking your price ceiling.
@@ -140,7 +143,7 @@ Noir proofs ensure your AI agent followed your "Aggressive" strategy without che
 Nodes prove honesty via zero-knowledge without revealing interaction history.
 
 ### 4. On-Chain Escrow
-Deals lock native AVAX in a minimal `Escrow.sol` contract (deposit → release, or depositor/expiry-based refund) instead of being purely simulated.
+Deals lock native SOL in a `cabal_escrow` Anchor program (deposit → release, or depositor/expiry-based refund) instead of being purely simulated. MagicBlock Ephemeral Rollups settle instantly.
 
 ## 🧪 Testing
 
@@ -148,8 +151,9 @@ Deals lock native AVAX in a minimal `Escrow.sol` contract (deposit → release, 
 
 ```bash
 cd src-tauri
-cargo check  # Verify compilation
-cargo test   # Run tests (when added)
+cargo check            # Verify compilation
+cargo test --features ts-rs --workspace   # Run tests (bindings included)
+npm run bindings:check # Verify src/types/bindings.ts is up to date
 ```
 
 ### Frontend
@@ -159,7 +163,14 @@ npm run build    # Production build
 npm run preview  # Preview build
 ```
 
-### Smart Contract
+### Anchor Escrow Program
+
+```bash
+cd anchor-escrow
+cargo test       # Rust program tests
+```
+
+### Legacy Solidity Contracts
 
 ```bash
 cd contracts
@@ -177,29 +188,29 @@ npx hardhat test   # Runs against Hardhat's in-memory network, no real funds
 
 | Layer | Technology | Purpose |
 |-------|-----------|---------|
-| **Physical** | Libp2p + mDNS | Hide IP/location |
+| **Physical** | libp2p + mDNS | Hide IP/location |
 | **Negotiation** | Ollama + FHE | Protect strategy |
 | **Verification** | Noir ZK | Prove without revealing |
-| **Settlement** | On-chain Escrow (Avalanche) | Trustless deal settlement |
+| **Settlement** | On-chain Escrow (Solana) | Trustless deal settlement |
 
 ## 📦 Dependencies
 
 ### Rust
-- `libp2p` - P2P networking
+- `libp2p` - P2P networking (QUIC, TCP, gossipsub, mDNS, relay, DCUtR)
 - `tokio` - Async runtime
-- `reqwest` - HTTP client
+- `reqwest` - HTTP client (rustls)
 - `serde` - Serialization
-- `alloy` - Avalanche/EVM signing, RPC, and contract calls
+- `solana-client` / `solana-sdk` - Solana RPC, signing, transactions
+- `tracing` - Structured logging (logcat on Android, OSLog on iOS)
 
 ### TypeScript
 - `@tauri-apps/api` - Tauri IPC
 - `react` - UI framework
-- `framer-motion` - Animations
-- `ethers` - Read-only Avalanche RPC helper (v6)
+- `@solana/web3.js` - Read-only Solana RPC helper
 
 ### Contracts
-- `hardhat` + `@nomicfoundation/hardhat-toolbox` - Solidity compile/test/deploy
-- `@openzeppelin/contracts` - `ReentrancyGuard` for the Escrow contract
+- `anchor-lang` + `ephemeral-rollups-sdk` - Solana escrow program
+- `hardhat` + `@nomicfoundation/hardhat-toolbox` - Legacy Solidity suite
 
 ## 🎯 Use Cases
 
@@ -232,7 +243,8 @@ MIT License - see LICENSE file
 
 ## 🙏 Acknowledgments
 
-- **Avalanche** - C-Chain settlement layer
+- **Solana** - Settlement layer
+- **MagicBlock** - Ephemeral Rollups
 - **Noir** - Zero-knowledge circuits
 - **libp2p** - P2P networking
 - **Tauri** - Cross-platform desktop framework
