@@ -1,0 +1,29 @@
+node_modules/
+dist/
+dist-desktop/
+dist-mobile/
+.env
+.env.local
+
+# Rust / Tauri
+src-tauri/target/
+src-tauri/gen/schemas
+
+# Runtime data (wallet vault, keys, identities) — never commit
+src-tauri/cabalmesh-data/
+
+# Stray ts-rs output: cabal-core's `export_to` path resolves here when the
+# bindings test runs without TS_RS_EXPORT_DIR=src-tauri. The canonical output
+# is src/types/bindings.ts; this location is never correct.
+src-tauri/crates/src/
+
+# Hardhat
+contracts/node_modules/
+contracts/artifacts/
+contracts/cache/
+contracts/typechain-types/
+contracts/.env
+
+# OS
+.DS_Store
+.scratch/

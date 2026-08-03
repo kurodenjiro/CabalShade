@@ -1,0 +1,28 @@
+[package]
+name = "cabal-escrow"
+version = "0.1.0"
+description = "CabalShade escrow on Solana + MagicBlock Ephemeral Rollups"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "cabal_escrow"
+
+[features]
+default = []
+cpi = ["no-entrypoint"]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+idl-build = ["anchor-lang/idl-build"]
+anchor-debug = []
+custom-heap = []
+custom-panic = []
+
+[dependencies]
+anchor-lang = { version = "0.32.1", features = ["init-if-needed"] }
+blake3 = "=1.5.5"
+ephemeral-rollups-sdk = { version = "0.16.2", features = ["anchor-compat"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }
