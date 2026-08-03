@@ -21,16 +21,13 @@
 //! entropy than 128 random bits. The story the AI writes is a **recall aid for
 //! the order of the words**, never part of the secret.
 
-use alloy::primitives::B256;
-use alloy::signers::local::PrivateKeySigner;
-
-/// One EVM private key is 128 bits of entropy → 12 words.
+/// One wallet's seed is 128 bits of entropy → 12 words.
 pub const WORD_COUNT: usize = 12;
 
 /// A valid 12-word BIP-39 phrase. `Debug` is redacted so a logged phrase never
 /// leaks the wallet.
 #[derive(Clone, PartialEq, Eq)]
-pub struct Mnemonic( bip39::Mnemonic );
+pub struct Mnemonic(bip39::Mnemonic);
 
 impl std::fmt::Debug for Mnemonic {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -93,25 +90,27 @@ impl Mnemonic {
         Ok(Self(mnemonic))
     }
 
-    /// The 32-byte EVM private key this phrase encodes.
+    /// The 32-byte Solana seed this phrase derives.
     ///
     /// Standard BIP-39 seed derivation: PBKDF2-HMAC-SHA512 of the mnemonic
-    /// (with passphrase "") produces 64 bytes; the first 32 are the private
-    /// key. This is what makes the phrase portable to any BIP-39 wallet —
-    /// the same words derive the same key everywhere.
+    /// (with passphrase "") produces 64 bytes; the first 32 are the seed for
+    /// the ed25519 keypair. This is what makes the phrase portable to any
+    /// BIP-39 wallet — the same words derive the same seed everywhere.
     #[must_use]
-    pub fn to_key(&self) -> B256 {
+    pub fn to_seed_bytes(&self) -> [u8; 32] {
         let seed = self.0.to_seed("");
-        B256::from_slice(&seed[..32])
+        let mut bytes = [0u8; 32];
+        bytes.copy_from_slice(&seed[..32]);
+        bytes
     }
 
-    /// The signer this phrase derives.
+    /// The Solana keypair this phrase derives.
     ///
     /// # Errors
     ///
-    /// If the 32-byte key does not form a valid secp256k1 secret.
-    pub fn to_signer(&self) -> Result<PrivateKeySigner, Box<dyn std::error::Error>> {
-        Ok(PrivateKeySigner::from_bytes(&self.to_key())?)
+    /// If the 32-byte seed does not form a valid ed25519 keypair.
+    pub fn to_keypair(&self) -> Result<solana_sdk::signature::Keypair, Box<dyn std::error::Error>> {
+        Ok(solana_sdk::signature::keypair_from_seed(&self.to_seed_bytes())?)
     }
 }
 
@@ -178,17 +177,17 @@ mod tests {
     #[test]
     fn a_generated_mnemonic_round_trips_through_its_words() {
         let mnemonic = Mnemonic::generate();
-        let key = mnemonic.to_key();
+        let key = mnemonic.to_seed_bytes();
         let words = mnemonic.words().join(" ");
         let parsed = Mnemonic::parse(&words).unwrap();
-        assert_eq!(parsed.to_key(), key);
+        assert_eq!(parsed.to_seed_bytes(), key);
     }
 
     #[test]
     fn a_key_derives_from_the_mnemonic_deterministically() {
         let a = Mnemonic::parse("abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about").unwrap();
         let b = Mnemonic::parse("abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about").unwrap();
-        assert_eq!(a.to_key(), b.to_key());
+        assert_eq!(a.to_seed_bytes(), b.to_seed_bytes());
     }
 
     #[test]
@@ -196,7 +195,7 @@ mod tests {
         let a = Mnemonic::generate();
         let b = Mnemonic::generate();
         if a.words() != b.words() {
-            assert_ne!(a.to_key(), b.to_key());
+            assert_ne!(a.to_seed_bytes(), b.to_seed_bytes());
         }
     }
 
@@ -220,7 +219,7 @@ mod tests {
         let mnemonic = Mnemonic::generate();
         let phrase = mnemonic.words().join(" ");
         let parsed = Mnemonic::parse(&phrase).unwrap();
-        assert_eq!(parsed.to_key(), mnemonic.to_key());
+        assert_eq!(parsed.to_seed_bytes(), mnemonic.to_seed_bytes());
     }
 
     #[test]

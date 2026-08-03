@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { motion } from "framer-motion";
 import { invoke } from "@tauri-apps/api/core";
-import { formatAvax, weiToAvax } from "../avax-settlement";
+import { SolanaSettlement } from "../solana-settlement";
 import { PixelClassIcon } from "./icons/PixelClassIcon";
 
 interface WalletCabinetProps {
@@ -203,8 +203,8 @@ export const WalletCabinet: React.FC<WalletCabinetProps> = ({ visible, onClose, 
 
     if (!visible) return null;
 
-    const nativeBalance = snapshot?.assets?.find((a) => a.symbol === "AVAX");
-    const balanceText = nativeBalance ? formatAvax(weiToAvax(parseFloat(nativeBalance.amount))) : "0.00000";
+    const nativeBalance = snapshot?.assets?.find((a) => a.symbol === "SOL");
+    const balanceText = nativeBalance ? parseFloat(SolanaSettlement.formatLamportsToSol(nativeBalance.amount)).toFixed(5) : "0.00000";
 
     return (
         <motion.div

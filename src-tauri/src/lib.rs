@@ -12,9 +12,9 @@ pub mod blockchain_bridge;
 pub mod matcher;
 pub mod mesh;
 
-/// Avalanche C-Chain backend. `blockchain_bridge` re-exports this so the
-/// frozen desktop surface and its IPC snapshots stay source-compatible.
-pub mod avax_bridge;
+/// Solana + MagicBlock chain backend. `blockchain_bridge` re-exports this so
+/// the frozen desktop surface and its IPC snapshots stay source-compatible.
+pub mod solana_bridge;
 
 /// BIP-39 mnemonic export/import for the wallet.
 pub mod mnemonic;
@@ -175,7 +175,8 @@ pub fn run() {
                 #[cfg(desktop)]
                 dotenv::dotenv().ok();
 
-                let rpc_url = std::env::var("AVAX_RPC_URL")
+                let rpc_url = std::env::var("SOLANA_RPC_URL")
+                    .or_else(|_| std::env::var("AVAX_RPC_URL"))
                     .unwrap_or_else(|_| blockchain_bridge::DEFAULT_AVAX_RPC_URL.to_string());
 
                 let bridge = Arc::new(Mutex::new(BlockchainBridge::new(Some(rpc_url))));

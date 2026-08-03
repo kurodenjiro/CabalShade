@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { invoke } from "@tauri-apps/api/core";
-import { formatAvax, weiToAvax } from "../avax-settlement";
+import { SolanaSettlement } from "../solana-settlement";
 import pouchIcon from "../assets/icons/icon_pouch.png";
 
 interface CompressedAsset {
@@ -83,8 +83,8 @@ export const WalletBalanceCompact: React.FC<WalletBalanceCompactProps> = ({ onOp
         }
     };
 
-    const nativeBalance = snapshot?.assets?.find((a) => a.symbol === "AVAX");
-    const balanceText = nativeBalance ? formatAvax(weiToAvax(parseFloat(nativeBalance.amount))) : "0.00000";
+    const nativeBalance = snapshot?.assets?.find((a) => a.symbol === "SOL");
+    const balanceText = nativeBalance ? parseFloat(SolanaSettlement.formatLamportsToSol(nativeBalance.amount)).toFixed(5) : "0.00000";
 
     return (
         <div className="relative">
@@ -94,7 +94,7 @@ export const WalletBalanceCompact: React.FC<WalletBalanceCompactProps> = ({ onOp
             >
                 <span className="text-[10px] text-slate-500 font-medium flex items-center gap-1">
                     <img src={pouchIcon} alt="" draggable={false} style={{ width: 12, height: 15, imageRendering: "pixelated" }} />
-                    {balanceText} AVAX
+                    {balanceText} SOL
                 </span>
                 {identity && (
                     <>

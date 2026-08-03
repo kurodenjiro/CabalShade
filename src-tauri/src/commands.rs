@@ -1039,20 +1039,20 @@ pub async fn vault_total(state: State<'_, AppState>) -> Result<String, AppError>
     let bridge = services.bridge.lock().await;
     let snapshot = bridge.get_latest_snapshot().map_err(|_| AppError::Chain { retryable: false })?;
 
-    // The native AVAX asset is what sync_state writes; sum what the snapshot
+    // The native SOL asset is what sync_state writes; sum what the snapshot
     // actually holds rather than assuming a fixed asset list.
-    let total_wei: u128 = snapshot
+    let total_lamports: u64 = snapshot
         .assets
         .iter()
-        .filter(|a| a.symbol == "AVAX")
-        .filter_map(|a| a.amount.parse::<u128>().ok())
+        .filter(|a| a.symbol == "SOL")
+        .filter_map(|a| a.amount.parse::<u64>().ok())
         .sum();
 
-    // Format wei -> AVAX as a decimal string, 18 places, so the value never
+    // Format lamports -> SOL as a decimal string, 9 places, so the value never
     // loses precision crossing to JS.
-    let whole = total_wei / 1_000_000_000_000_000_000;
-    let fraction = total_wei % 1_000_000_000_000_000_000;
-    Ok(format!("{whole}.{fraction:018}"))
+    let whole = total_lamports / 1_000_000_000;
+    let fraction = total_lamports % 1_000_000_000;
+    Ok(format!("{whole}.{fraction:09}"))
 }
 
 /// What the profile screen shows.
@@ -1225,14 +1225,16 @@ pub async fn import_mnemonic(
         field: "mnemonic",
         reason: InvalidReason::Malformed,
     })?;
-    let key = phrase.to_key();
+    let keypair = phrase
+        .to_keypair()
+        .map_err(|_| AppError::InvalidIntent { field: "mnemonic", reason: InvalidReason::Malformed })?;
     let words = phrase.words().join(" ");
+    let key = bs58::encode(keypair.to_bytes()).into_string();
 
     let services = state.services()?;
     let mut bridge = services.bridge.lock().await;
-    let hex_key = format!("0x{:064x}", key);
     bridge
-        .import_with_mnemonic(hex_key, Some(words), alias, emoji)
+        .import_with_mnemonic(key, Some(words), alias, emoji)
         .map_err(|_| AppError::Internal)
 }
 
