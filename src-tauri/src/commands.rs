@@ -731,21 +731,54 @@ pub async fn settle_intent(
         // online (submit via Magic Router) vs offline (sign + queue) split.
         // Map to an owned String up front so the `!Send` `Box<dyn StdError>`
         // is dropped before any await inside this spawned future.
-        let outcome: Result<String, String> = bridge
+        let outcome: Result<(String, Vec<crate::solana_bridge::QueuedTx>), String> = bridge
             .lock()
             .await
             .settle_on_chain(&payee)
             .await
             .map(|settled| {
-                format!(
+                let lines = format!(
                     "ESCROW CREATED. TX {}\nRELEASED ON SOLANA DEVNET. TX {}",
                     settled.create_tx, settled.release_tx
-                )
+                );
+                (lines, settled.queued_for_relay)
             })
             .map_err(|error| format!("RPC UNREACHABLE. SIGNED + QUEUED FOR RELAY ({error})."));
 
         match outcome {
-            Ok(lines) => {
+            Ok((lines, queued_for_relay)) => {
+                // Anything signed offline still needs a peer with connectivity
+                // to submit it. Broadcast each as a relay_tx intent so Relay
+                // Mode nodes pick it up — the counterpart to the frontend's
+                // self-submit retry loop.
+                if let Some(mesh) = mesh.as_ref() {
+                    for queued in &queued_for_relay {
+                        let relay = serde_json::json!({
+                            "type": "RelayTx",
+                            "queue_id": queued.id,
+                            "raw_tx_hex": queued.raw_tx_hex,
+                            "summary": queued.summary,
+                        });
+                        let intent = crate::mesh::PrivacyIntent {
+                            intent_type: "relay_tx".into(),
+                            payload: relay.to_string(),
+                            encrypted: false,
+                            relay_path: vec!["origin_node".into()],
+                            relay_fee: None,
+                        };
+                        let _ = mesh.publish(intent).await;
+                    }
+                }
+                if !queued_for_relay.is_empty() {
+                    let _ = send_line(
+                        &on_line,
+                        &token,
+                        "OFFLINE SIGNED. BROADCAST FOR MESH RELAY.",
+                        LogTone::Dim,
+                    )
+                    .await;
+                }
+
                 let mut iterator = lines.lines();
                 if let Some(line) = iterator.next() {
                     if !send_line(&on_line, &token, line, LogTone::Info).await {

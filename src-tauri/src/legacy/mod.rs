@@ -199,7 +199,10 @@ pub async fn release_escrow(
 ) -> Result<String, String> {
     let state = state.services().map_err(adapt::flatten_error)?;
     let bridge = state.bridge.lock().await;
-    bridge.release_escrow(escrow_id).await.map_err(adapt::flatten_error)
+    match bridge.release_escrow(escrow_id).await.map_err(adapt::flatten_error)? {
+        TxResult::Confirmed { id } => Ok(format!("escrow-{id}")),
+        TxResult::Queued { queue_id } => Ok(queue_id),
+    }
 }
 
 #[tauri::command]
@@ -209,7 +212,10 @@ pub async fn refund_escrow(
 ) -> Result<String, String> {
     let state = state.services().map_err(adapt::flatten_error)?;
     let bridge = state.bridge.lock().await;
-    bridge.refund_escrow(escrow_id).await.map_err(adapt::flatten_error)
+    match bridge.refund_escrow(escrow_id).await.map_err(adapt::flatten_error)? {
+        TxResult::Confirmed { id } => Ok(format!("escrow-{id}")),
+        TxResult::Queued { queue_id } => Ok(queue_id),
+    }
 }
 
 #[tauri::command]

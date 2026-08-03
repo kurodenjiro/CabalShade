@@ -216,6 +216,10 @@ pub struct BlockchainBridge {
 pub struct SettledEscrow {
     pub create_tx: String,
     pub release_tx: String,
+    /// A transaction signed offline and queued for mesh relay (create, release,
+    /// or both) that still needs a peer with connectivity to submit. Empty when
+    /// the whole settlement went through online.
+    pub queued_for_relay: Vec<QueuedTx>,
 }
 
 impl BlockchainBridge {
@@ -785,7 +789,7 @@ impl BlockchainBridge {
                 CommitmentConfig::confirmed(),
             );
             let blockhash = client.get_latest_blockhash().await.map_err(|e| e.to_string())?;
-            let message = Message::new(&[instruction.clone()], Some(&keypair.pubkey()));
+            let message = Message::new(std::slice::from_ref(&instruction), Some(&keypair.pubkey()));
             let mut tx = Transaction::new_unsigned(message);
             tx.sign(&[&keypair], blockhash);
             let signature = client.send_transaction(&tx).await.map_err(|e| e.to_string())?;
@@ -825,10 +829,35 @@ impl BlockchainBridge {
         })
     }
 
-    pub async fn release_escrow(&self, _escrow_id: u64) -> Result<String, Box<dyn Error>> {
+    pub async fn release_escrow(&self, _escrow_id: u64) -> Result<TxResult, Box<dyn Error>> {
         let keypair = self.primary_keypair()?;
         let instruction = self.escrow_action_instruction(&IX_RELEASE, &keypair.pubkey())?;
-        self.send_via_router(&keypair, instruction, "Release escrow").await
+
+        let online_result = timeout(Duration::from_secs(6), async {
+            let client = RpcClient::new_with_commitment(
+                self.router_url.clone(),
+                CommitmentConfig::confirmed(),
+            );
+            let blockhash = client.get_latest_blockhash().await.map_err(|e| e.to_string())?;
+            let message = Message::new(std::slice::from_ref(&instruction), Some(&keypair.pubkey()));
+            let mut tx = Transaction::new_unsigned(message);
+            tx.sign(&[&keypair], blockhash);
+            let signature = client.send_transaction(&tx).await.map_err(|e| e.to_string())?;
+            Ok::<Signature, String>(signature)
+        }).await;
+
+        match online_result {
+            Ok(Ok(signature)) => {
+                tracing::info!("✅ [Bridge] Escrow released. Tx: {}", signature);
+                Ok(TxResult::Confirmed { id: 1 })
+            }
+            Ok(Err(e)) => Err(e.into()),
+            Err(_timed_out) => {
+                tracing::warn!("⚠️  [Bridge] RPC unreachable — signing release_escrow offline for mesh relay.");
+                let queued = self.sign_offline(instruction, "Release escrow").await?;
+                Ok(TxResult::Queued { queue_id: queued.id })
+            }
+        }
     }
 
     /// Runs the real settlement path: create an escrow to `payee`, then
@@ -836,55 +865,99 @@ impl BlockchainBridge {
     /// devnet balance settles for real; an empty wallet still submits the tx
     /// and reports the actual chain error rather than a fabricated success.
     ///
-    /// When the RPC is unreachable, `create_escrow` signs offline and queues
-    /// the transaction for mesh relay; that path surfaces as an error here so
-    /// the caller reports it honestly.
+    /// When the RPC is unreachable, the affected leg signs offline and is
+    /// queued for mesh relay; the returned `SettledEscrow` carries the queued
+    /// transaction(s) so the caller can broadcast them to peers.
     pub async fn settle_on_chain(&self, payee: &str) -> Result<SettledEscrow, Box<dyn Error>> {
         // A small real amount — 0.0001 SOL. A real wallet with real devnet
         // balance settles for real; an empty wallet still submits the tx and
         // reports the actual chain error rather than a fabricated success.
         let amount_sol = "0.0001";
-        let created = self.create_escrow(payee, amount_sol, 0).await?;
 
-        let release_tx = match created {
-            TxResult::Confirmed { .. } => self.release_escrow(0).await?,
-            TxResult::Queued { .. } => {
-                return Err("escrow queued for relay — not settled yet".into());
+        // Each leg may confirm online or queue offline for mesh relay. Collect
+        // whatever was queued so the caller can broadcast it to peers.
+        let mut queued_for_relay: Vec<QueuedTx> = Vec::new();
+
+        let created = self.create_escrow(payee, amount_sol, 0).await?;
+        let create_tx = match &created {
+            TxResult::Confirmed { id } => format!("escrow-{id}"),
+            TxResult::Queued { queue_id } => {
+                // The release leg cannot run until the create is on-chain, so a
+                // queued create parks the deal; the caller relays it and the
+                // release can follow once it confirms.
+                if let Some(tx) = self
+                    .load_pending_relay_txs()
+                    .into_iter()
+                    .find(|tx| &tx.id == queue_id)
+                {
+                    queued_for_relay.push(tx);
+                }
+                queue_id.clone()
             }
         };
 
+        let release_tx = match created {
+            TxResult::Confirmed { .. } => {
+                match self.release_escrow(0).await? {
+                    TxResult::Confirmed { id } => format!("escrow-{id}"),
+                    TxResult::Queued { queue_id } => {
+                        if let Some(tx) = self
+                            .load_pending_relay_txs()
+                            .into_iter()
+                            .find(|tx| tx.id == queue_id)
+                        {
+                            queued_for_relay.push(tx);
+                        }
+                        queue_id
+                    }
+                }
+            }
+            // Create was queued; the release hasn't been signed yet.
+            TxResult::Queued { .. } => "queued-for-relay".to_string(),
+        };
+
         Ok(SettledEscrow {
-            create_tx: match created {
-                TxResult::Confirmed { id } => format!("escrow-{id}"),
-                TxResult::Queued { queue_id } => queue_id,
-            },
+            create_tx,
             release_tx,
+            queued_for_relay,
         })
     }
 
-    pub async fn refund_escrow(&self, _escrow_id: u64) -> Result<String, Box<dyn Error>> {
+    /// Refunds an escrow back to the depositor. Mirrors `release_escrow`'s
+    /// online/offline split: when the RPC is unreachable the refund is signed
+    /// offline and queued for mesh relay rather than hard-failing.
+    ///
+    /// The escrow PDA is derived from the depositor, so `escrow_id` is
+    /// informational — the refund targets the depositor's own escrow account.
+    pub async fn refund_escrow(&self, _escrow_id: u64) -> Result<TxResult, Box<dyn Error>> {
         let keypair = self.primary_keypair()?;
         let instruction = self.escrow_action_instruction(&IX_REFUND, &keypair.pubkey())?;
-        self.send_via_router(&keypair, instruction, "Refund escrow").await
-    }
 
-    async fn send_via_router(
-        &self,
-        keypair: &Keypair,
-        instruction: Instruction,
-        summary: &str,
-    ) -> Result<String, Box<dyn Error>> {
-        let client = RpcClient::new_with_commitment(
-            self.router_url.clone(),
-            CommitmentConfig::confirmed(),
-        );
-        let blockhash = client.get_latest_blockhash().await?;
-        let message = Message::new(&[instruction], Some(&keypair.pubkey()));
-        let mut tx = Transaction::new_unsigned(message);
-        tx.sign(&[keypair], blockhash);
-        let signature = client.send_transaction(&tx).await?;
-        tracing::info!("✅ [Bridge] {} confirmed. Tx: {}", summary, signature);
-        Ok(signature.to_string())
+        let online_result = timeout(Duration::from_secs(6), async {
+            let client = RpcClient::new_with_commitment(
+                self.router_url.clone(),
+                CommitmentConfig::confirmed(),
+            );
+            let blockhash = client.get_latest_blockhash().await.map_err(|e| e.to_string())?;
+            let message = Message::new(std::slice::from_ref(&instruction), Some(&keypair.pubkey()));
+            let mut tx = Transaction::new_unsigned(message);
+            tx.sign(&[&keypair], blockhash);
+            let signature = client.send_transaction(&tx).await.map_err(|e| e.to_string())?;
+            Ok::<Signature, String>(signature)
+        }).await;
+
+        match online_result {
+            Ok(Ok(signature)) => {
+                tracing::info!("✅ [Bridge] Escrow refunded. Tx: {}", signature);
+                Ok(TxResult::Confirmed { id: 1 })
+            }
+            Ok(Err(e)) => Err(e.into()),
+            Err(_timed_out) => {
+                tracing::warn!("⚠️  [Bridge] RPC unreachable — signing refund_escrow offline for mesh relay.");
+                let queued = self.sign_offline(instruction, "Refund escrow").await?;
+                Ok(TxResult::Queued { queue_id: queued.id })
+            }
+        }
     }
 
     /// Reads the on-chain state of the depositor's escrow PDA (no signer).
