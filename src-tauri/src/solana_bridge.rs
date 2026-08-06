@@ -971,14 +971,18 @@ impl BlockchainBridge {
     /// itself queued is not re-fires — the next tick sees it as a queued
     /// release, not a create.
     pub async fn resume_pending_settlements(&self) -> Vec<QueuedTx> {
-        let pending = self.load_pending_relay_txs();
+        let mut pending = self.load_pending_relay_txs();
         let mut released = Vec::new();
+        let mut changed = false;
 
-        for tx in pending {
+        for tx in &mut pending {
             if tx.status == "confirmed" && tx.summary == "Create escrow" {
                 match self.release_escrow(0).await {
                     Ok(TxResult::Confirmed { id }) => {
                         tracing::info!(id = %tx.id, "resumed settlement: create confirmed, release submitted");
+                        tx.status = "completed".to_string();
+                        tx.summary = "Create escrow (released)".to_string();
+                        changed = true;
                         released.push(QueuedTx {
                             id: format!("escrow-{id}"),
                             raw_tx_hex: String::new(),
@@ -992,6 +996,9 @@ impl BlockchainBridge {
                     }
                     Ok(TxResult::Queued { queue_id }) => {
                         tracing::info!(id = %tx.id, "resumed settlement: release signed offline, queued for relay");
+                        tx.status = "completed".to_string();
+                        tx.summary = "Create escrow (release queued)".to_string();
+                        changed = true;
                         if let Some(queued) = self
                             .load_pending_relay_txs()
                             .into_iter()
@@ -1004,6 +1011,12 @@ impl BlockchainBridge {
                         tracing::warn!(id = %tx.id, %error, "resume settlement failed");
                     }
                 }
+            }
+        }
+
+        if changed {
+            if let Err(e) = self.save_pending_relay_txs(&pending) {
+                tracing::warn!(error = %e, "failed to persist settlement resume state");
             }
         }
 
