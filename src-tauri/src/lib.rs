@@ -221,6 +221,53 @@ pub fn run() {
                             }
                         });
 
+                        // Resume parked settlements: when the escrow create leg
+                        // was signed offline and queued for relay, it confirms
+                        // asynchronously (self-submit or a peer's relay). Once
+                        // it lands, fire the release leg. Mirrors the
+                        // frontend's self-submit retry cadence, but works
+                        // without the desktop UI.
+                        let resume_bridge = bridge.clone();
+                        let resume_mesh = mesh_handle.clone();
+                        tokio::spawn(async move {
+                            let mut ticker =
+                                tokio::time::interval(std::time::Duration::from_secs(10));
+                            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                            loop {
+                                ticker.tick().await;
+                                let released = {
+                                    let bridge = resume_bridge.lock().await;
+                                    bridge.resume_pending_settlements().await
+                                };
+                                if released.is_empty() {
+                                    continue;
+                                }
+                                // A release that itself queued offline still
+                                // needs a peer with connectivity to submit it;
+                                // broadcast the real raw transaction.
+                                for queued in released
+                                    .into_iter()
+                                    .filter(|q| !q.raw_tx_hex.is_empty())
+                                {
+                                    let _ = resume_mesh
+                                        .publish(crate::mesh::PrivacyIntent {
+                                            intent_type: "relay_tx".into(),
+                                            payload: serde_json::json!({
+                                                "type": "RelayTx",
+                                                "queue_id": queued.id,
+                                                "raw_tx_hex": queued.raw_tx_hex,
+                                                "summary": queued.summary,
+                                            })
+                                            .to_string(),
+                                            encrypted: false,
+                                            relay_path: vec!["origin_node".into()],
+                                            relay_fee: None,
+                                        })
+                                        .await;
+                                }
+                            }
+                        });
+
                         state.set_services(state::Services {
                             mesh: Some(mesh_handle),
                             agent: Arc::new(SharkAgent::new(None)),

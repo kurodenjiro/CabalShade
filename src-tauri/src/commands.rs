@@ -793,24 +793,30 @@ pub async fn settle_intent(
                     }
                 }
 
-                // Move to Settled with the REAL release signature as proof.
-                let release_tx = lines
-                    .lines()
-                    .last()
-                    .and_then(|line| line.rsplit(' ').next())
-                    .unwrap_or_default()
-                    .to_owned();
+                // Honest status: only a release that actually confirmed on-chain
+                // is a settlement. When any leg was signed offline and queued
+                // for relay, the deal is Waiting — the proof cannot be written
+                // until the create lands and the release runs. The resume task
+                // in lib.rs fires the release once the queued create confirms.
+                let next_status = if queued_for_relay.is_empty() {
+                    // The release tx signature is the real proof.
+                    let release_tx = lines
+                        .lines()
+                        .last()
+                        .and_then(|line| line.rsplit(' ').next())
+                        .unwrap_or_default()
+                        .to_owned();
+                    IntentStatus::Settled {
+                        proof: cabal_core::ProofHash::new(release_tx),
+                        filled_at: cabal_core::UsdPrice::from_cents(0),
+                        elapsed_ms: 0,
+                    }
+                } else {
+                    IntentStatus::Waiting
+                };
                 {
                     let mut store = intents.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                    let _ = store.transition(
-                        &id,
-                        IntentStatus::Settled {
-                            proof: cabal_core::ProofHash::new(release_tx),
-                            filled_at: cabal_core::UsdPrice::from_cents(0),
-                            elapsed_ms: 0,
-                        },
-                        now,
-                    );
+                    let _ = store.transition(&id, next_status, now);
                 }
                 let snapshot = intents
                     .lock()

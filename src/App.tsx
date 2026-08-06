@@ -120,15 +120,22 @@ function App() {
         return () => { cancelled = true; };
     }, []);
 
-    // Announce our real wallet address over the mesh whenever we have one and
-    // whenever a new peer joins — mDNS discovery alone only reveals ephemeral
-    // libp2p PeerIDs, not who's actually behind them.
+    // Announce our real wallet address over the mesh — a peer can only settle
+    // to us if it knows our address. Re-broadcast on an interval (matching the
+    // balance-refresh cadence) rather than only on peer-count change: a peer
+    // that joins after the one-shot, or a dropped gossipsub message, would
+    // otherwise mean settlement falls back to a devnet test address.
     useEffect(() => {
         if (!myAddress) return;
-        invoke("send_intent_to_mesh", {
-            payload: JSON.stringify({ type: "Presence", address: myAddress }),
-        }).catch(console.error);
-    }, [myAddress, peers.length]);
+        const announce = () => {
+            invoke("send_intent_to_mesh", {
+                payload: JSON.stringify({ type: "Presence", address: myAddress }),
+            }).catch(console.error);
+        };
+        announce();
+        const interval = setInterval(announce, 15000);
+        return () => clearInterval(interval);
+    }, [myAddress]);
 
     // Real, periodically-refreshed SOL balance — used to reject an intent whose
     // max price already exceeds what the wallet actually holds, instead of letting

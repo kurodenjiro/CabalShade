@@ -960,6 +960,56 @@ impl BlockchainBridge {
         }
     }
 
+    /// Fires the release leg for any escrow whose create transaction has
+    /// confirmed on-chain but whose release was never signed (the create was
+    /// queued offline for relay and has since landed). Returns the release
+    /// transactions that were newly submitted online (with their tx hashes) or
+    /// newly queued offline (with their raw bytes), so the caller can
+    /// re-broadcast a queued release for relay.
+    ///
+    /// Idempotent: a queued create is processed once, and a release that is
+    /// itself queued is not re-fires — the next tick sees it as a queued
+    /// release, not a create.
+    pub async fn resume_pending_settlements(&self) -> Vec<QueuedTx> {
+        let pending = self.load_pending_relay_txs();
+        let mut released = Vec::new();
+
+        for tx in pending {
+            if tx.status == "confirmed" && tx.summary == "Create escrow" {
+                match self.release_escrow(0).await {
+                    Ok(TxResult::Confirmed { id }) => {
+                        tracing::info!(id = %tx.id, "resumed settlement: create confirmed, release submitted");
+                        released.push(QueuedTx {
+                            id: format!("escrow-{id}"),
+                            raw_tx_hex: String::new(),
+                            summary: "Release escrow".into(),
+                            created_at: tx.created_at,
+                            status: "confirmed".into(),
+                            tx_hash: Some(format!("escrow-{id}")),
+                            reason: None,
+                            attempts: 0,
+                        });
+                    }
+                    Ok(TxResult::Queued { queue_id }) => {
+                        tracing::info!(id = %tx.id, "resumed settlement: release signed offline, queued for relay");
+                        if let Some(queued) = self
+                            .load_pending_relay_txs()
+                            .into_iter()
+                            .find(|q| q.id == queue_id)
+                        {
+                            released.push(queued);
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(id = %tx.id, %error, "resume settlement failed");
+                    }
+                }
+            }
+        }
+
+        released
+    }
+
     /// Reads the on-chain state of the depositor's escrow PDA (no signer).
     pub async fn get_escrow_status(&self, _escrow_id: u64) -> Result<serde_json::Value, Box<dyn Error>> {
         let primary = self.get_primary_address();

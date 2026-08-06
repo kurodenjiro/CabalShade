@@ -52,9 +52,17 @@ export function Detail({
       // settle_intent streams verification lines over the Channel and returns
       // the subscription id; the stream closes itself on completion.
       await invoke<string>("settle_intent", { id, onLine: channel });
-      setLog((lines) => [...lines, { text: "SETTLED.", tone: "ok" }]);
-      setBusy(false);
-      onSettled();
+      // Only a genuinely settled intent has a proof to show. When the escrow
+      // create was signed offline and queued for relay, the intent lands in
+      // WAITING — stay here and let the resume path finish it.
+      const next = await invoke<IntentDetail>("get_intent", { id }).catch(() => null);
+      if (next?.view.status.status === "SETTLED") {
+        setLog((lines) => [...lines, { text: "SETTLED.", tone: "ok" }]);
+        setBusy(false);
+        onSettled();
+      } else {
+        setBusy(false);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
       setBusy(false);
