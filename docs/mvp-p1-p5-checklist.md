@@ -59,3 +59,13 @@ CARGO_TARGET_DIR=/tmp/cabalshade-target cargo test --manifest-path src-tauri/Car
 
 The remaining unchecked items require a desktop Tauri runtime and a funded
 devnet wallet; they are not safely verifiable in a headless build environment.
+
+## Known integration gap
+
+The browser preview does not provide the real Tauri IPC bridge, so browser
+smoke tests validate rendering and navigation only. The Solana program and UI
+actions have been tested separately. A complete proof of the production path
+(`UI click → Tauri IPC → MagicBlock ER release → explorer transaction`) is not
+yet available because ER release is still failing on account/fee routing. Do
+not describe the MVP as having a verified end-to-end ER transaction until a
+desktop Tauri run succeeds with a funded devnet wallet and an explorer link.
