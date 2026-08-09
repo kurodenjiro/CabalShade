@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import { invoke } from "@tauri-apps/api/core";
 import { ContentRecord } from "../types";
@@ -32,6 +32,8 @@ const STEP_LABEL: Record<Step, string> = {
 };
 
 export const ServiceCreator: React.FC<ServiceCreatorProps> = ({ onClose, onDeploy }) => {
+    const dialogRef = useRef<HTMLDivElement>(null);
+    const descriptionRef = useRef<HTMLTextAreaElement>(null);
     const [voucherType, setVoucherType] = useState(VOUCHER_TYPES[0]);
     const [customType, setCustomType] = useState("");
     const [description, setDescription] = useState("");
@@ -49,6 +51,35 @@ export const ServiceCreator: React.FC<ServiceCreatorProps> = ({ onClose, onDeplo
     const isDeploying = step !== "idle" && step !== "done";
     const hasContent = isPdfListing ? extractedText.trim().length > 0 : description.trim().length > 0;
     const canDeploy = effectiveType.length > 0 && hasContent && parseFloat(priceAvax) > 0 && !isDeploying && !extracting;
+
+    useEffect(() => {
+        descriptionRef.current?.focus();
+        const dialog = dialogRef.current;
+        if (!dialog) return;
+        const onKeyDown = (event: KeyboardEvent) => {
+            if (event.key === "Escape" && !isDeploying) {
+                event.preventDefault();
+                onClose();
+                return;
+            }
+            if (event.key !== "Tab") return;
+            const focusable = Array.from(dialog.querySelectorAll<HTMLElement>(
+                'button:not([disabled]), input:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+            ));
+            if (focusable.length === 0) return;
+            const first = focusable[0];
+            const last = focusable[focusable.length - 1];
+            if (event.shiftKey && document.activeElement === first) {
+                event.preventDefault();
+                last.focus();
+            } else if (!event.shiftKey && document.activeElement === last) {
+                event.preventDefault();
+                first.focus();
+            }
+        };
+        dialog.addEventListener("keydown", onKeyDown);
+        return () => dialog.removeEventListener("keydown", onKeyDown);
+    }, [isDeploying, onClose]);
 
     const handlePdfSelect = async (file: File) => {
         setPdfFileName(file.name);
@@ -110,6 +141,11 @@ export const ServiceCreator: React.FC<ServiceCreatorProps> = ({ onClose, onDeplo
 
     return (
         <motion.div
+            ref={dialogRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="create-listing-title"
+            tabIndex={-1}
             className="absolute inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-8"
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
@@ -119,7 +155,7 @@ export const ServiceCreator: React.FC<ServiceCreatorProps> = ({ onClose, onDeplo
 
                 {/* Header */}
                 <div className="bg-slate-50 p-3 border-b border-slate-200 flex justify-between items-center">
-                    <span className="text-nobody-gold font-pixel tracking-wide text-[10px]">[ ✨ CREATE NEW LISTING ]</span>
+                    <span id="create-listing-title" className="text-nobody-gold font-pixel tracking-wide text-[10px]">[ ✨ CREATE NEW LISTING ]</span>
                     <div className="flex gap-4 text-xs">
                         <span className="text-slate-500">Mode: Trading Post</span>
                         <span className="text-nobody-primary font-medium">🛡️ On-chain: Fuji</span>
@@ -189,6 +225,7 @@ export const ServiceCreator: React.FC<ServiceCreatorProps> = ({ onClose, onDeplo
                         <div className="space-y-2">
                             <label className="text-slate-500 text-xs font-semibold">What are you offering?</label>
                             <textarea
+                                ref={descriptionRef}
                                 value={description}
                                 onChange={(e) => setDescription(e.target.value)}
                                 disabled={isDeploying}

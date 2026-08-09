@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { motion } from "framer-motion";
 import { invoke } from "@tauri-apps/api/core";
 import { ContentRecord } from "../types";
@@ -35,6 +35,38 @@ export const SmartEscrow: React.FC<SmartEscrowProps> = ({ visible, escrowId, dea
     // button never looks unresponsive and errors are actually visible.
     const [confirmingRefund, setConfirmingRefund] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const dialogRef = useRef<HTMLDivElement>(null);
+    const releaseRef = useRef<HTMLButtonElement>(null);
+
+    useEffect(() => {
+        if (!visible) return;
+        releaseRef.current?.focus();
+        const dialog = dialogRef.current;
+        if (!dialog) return;
+        const onKeyDown = (event: KeyboardEvent) => {
+            if (event.key === "Escape" && !releasing && !refunding) {
+                event.preventDefault();
+                onClose();
+                return;
+            }
+            if (event.key !== "Tab") return;
+            const focusable = Array.from(dialog.querySelectorAll<HTMLElement>(
+                'button:not([disabled]), input:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+            ));
+            if (focusable.length === 0) return;
+            const first = focusable[0];
+            const last = focusable[focusable.length - 1];
+            if (event.shiftKey && document.activeElement === first) {
+                event.preventDefault();
+                last.focus();
+            } else if (!event.shiftKey && document.activeElement === last) {
+                event.preventDefault();
+                first.focus();
+            }
+        };
+        dialog.addEventListener("keydown", onKeyDown);
+        return () => dialog.removeEventListener("keydown", onKeyDown);
+    }, [visible, releasing, refunding, onClose]);
 
     useEffect(() => {
         if (visible) {
@@ -119,6 +151,11 @@ export const SmartEscrow: React.FC<SmartEscrowProps> = ({ visible, escrowId, dea
 
     return (
         <motion.div
+            ref={dialogRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="smart-escrow-title"
+            tabIndex={-1}
             className="absolute inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
@@ -128,7 +165,7 @@ export const SmartEscrow: React.FC<SmartEscrowProps> = ({ visible, escrowId, dea
 
                 <div className="text-center mb-10">
                     <div className="text-amber-600 text-xs font-semibold tracking-widest mb-2 uppercase">Smart Escrow Protocol</div>
-                    <h1 className="text-2xl text-slate-900 font-bold">
+                    <h1 id="smart-escrow-title" className="text-2xl text-slate-900 font-bold">
                         {released ? "⚔️ Quest Complete!" : refunded ? "Refunded" : "⚔️ Quest In Progress"}
                     </h1>
                 </div>
@@ -207,6 +244,9 @@ export const SmartEscrow: React.FC<SmartEscrowProps> = ({ visible, escrowId, dea
 
                 <div className="space-y-2">
                     <button
+                        ref={releaseRef}
+                        type="button"
+                        aria-label={released ? "Funds released" : "Release funds"}
                         onClick={handleRelease}
                         disabled={released || releasing || refunding || refunded || escrowId == null}
                         className={`w-full font-semibold py-3 pixel-corners-sm transition-colors shadow-card ${released

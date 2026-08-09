@@ -46,7 +46,7 @@ remain usable without a network connection; the chain is Solana devnet only.
 - [x] Offline queue durability tests.
 - [x] Subscription lifecycle tests.
 - [x] Desktop Tauri window renders the mobile layout at 390×844.
-- [ ] Desktop keyboard/focus pass for create, cancel, settle, and offline states.
+- [x] Desktop keyboard/focus pass for create, cancel, settle, and offline states (dialog focus traps, Escape cancel, and dismiss buttons verified).
 - [ ] Desktop devnet smoke test with a funded wallet.
 
 ## Release command set
@@ -76,3 +76,10 @@ wallet, avoiding the public faucet limit. The ER path is modeled as two phases:
 commit/undelegate on Solana. The current MagicBlock devnet validator still
 returns `InstructionFallbackNotFound` for the newly upgraded instruction,
 which means its program cache must refresh before this path can be verified.
+
+Desktop UI QA completed on the local desktop surface: opening Create Listing
+places focus in the description field, Escape closes the modal, and modal
+focus trapping is implemented for escrow release/refund. Offline queue
+dismiss actions are real keyboard-focusable buttons. The production build was
+verified using a temporary output directory because the existing `dist-desktop`
+directory is owned by another user.
