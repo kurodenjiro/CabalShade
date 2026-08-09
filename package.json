@@ -6,8 +6,6 @@
   "scripts": {
     "dev": "vite --mode mobile --configLoader runner",
     "build": "tsc -p tsconfig.mobile.json && vite build --mode mobile --configLoader runner",
-    "dev:legacy": "vite --configLoader runner",
-    "build:legacy": "tsc && vite build --configLoader runner",
     "dev:mobile": "vite --mode mobile --configLoader runner",
     "build:mobile": "tsc -p tsconfig.mobile.json && vite build --mode mobile --configLoader runner",
     "preview": "vite preview --outDir dist-mobile-mvp",
