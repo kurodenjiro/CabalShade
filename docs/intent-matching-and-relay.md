@@ -70,6 +70,36 @@ queued transactions were being broadcast to peers that did nothing with them):
 A relayer pays nothing: the transaction arrives fully signed by its originator,
 who is also its fee payer.
 
+### Boost NFT trades take the other route
+
+A Boost trade is not an escrow. The seller lists the NFT on-chain from the
+marketplace screen and broadcasts a `SELL BOOST NFT` intent carrying the mint;
+the buyer composes `BUY BOOST NFT` with a lamport ceiling. Once matched, the
+**buyer** pays — `buy_boost` spends the buyer's SOL, so only the buyer can sign
+it. The seller therefore publishes a `boost_purchase_request` naming the mint,
+and the buyer acts on it.
+
+Three things were wrong with that path and are now fixed:
+
+- **An online buyer never completed the purchase.** The buyer always signed
+  offline and queued for relay, so the trade only closed if some *other* peer
+  volunteered to submit it — and if this device's own drain loop got there
+  first, the peer's attempt came back `failed` and nothing settled at all. The
+  buyer now submits directly whenever it can reach the chain, and a queued
+  purchase that this device later drains settles the deal too. Relay is the
+  fallback for a genuinely offline buyer, not the only route.
+- **The buyer could overpay.** `buy_boost` pays whatever the listing account
+  says and takes no ceiling; the negotiated price came from the intent bands,
+  and the marketplace lists at a fixed 100000 lamports regardless. A buyer whose
+  ceiling was below that still matched and would have paid the listing price.
+  The buyer now reads the listing price on-chain and refuses anything its own
+  condition does not accept.
+- **A live trade could be recorded as cancelled.** Both sides cancelled after
+  30 seconds of silence, while a signed purchase might still be in flight — so
+  the ledger could say "called off" for a trade that then completed and moved
+  the NFT. Silence is no longer treated as proof: the order stays open and the
+  chase keeps asking.
+
 ### Repeated announcements actually leave the node
 
 `mesh.rs` derives a gossipsub message id from a **hash of the payload**, so a
@@ -156,6 +186,23 @@ tail -f ~/.cabalmesh-demo/peer-b/app.log
 
 Stop everything with `pkill -f cabalmesh`.
 
+### Testing a Boost NFT purchase
+
+Both wallets need devnet SOL (claiming and buying both cost fees).
+
+1. On peer B: **New → SELL → SELL NFT** opens the marketplace. `CLAIM DEMO
+   BOOST` mints one, then list it — that lists on-chain at 100000 lamports
+   *and* broadcasts a `SELL BOOST NFT` intent carrying the mint.
+2. On peer A: **New → BUY → BUY BOOST NFT**, ceiling `0.0001` SOL or higher.
+3. They match, the seller sends a purchase request, and peer A buys.
+
+Expect in peer A's log: `LISTING VERIFIED AT 100000 LAMPORTS` then
+`PURCHASED ON DEVNET. TX …`, and both sides `SETTLED`.
+
+Set the ceiling *below* 0.0001 SOL (e.g. `0.00005`) to check the guard: the
+orders still match on their bands, but peer A refuses with
+`LISTING WANTS 100000 LAMPORTS, ABOVE YOUR LIMIT` rather than overpaying.
+
 ### Testing the offline / relay path
 
 Give one peer an unroutable RPC so its call times out (a *refused* connection
@@ -199,9 +246,22 @@ npm run bindings:check
 
 ## 3. Verified on 2026-08-09
 
+- **A complete settlement, end to end, on devnet.** Two peers matched at 9500
+  cents; the seller created and released the escrow; the buyer verified the
+  announced signature against the chain and settled on the evidence.
+
+  ```
+  peer-b  Create escrow    4kT8VWYHfe7foC5gfEbpN8HCFsZhn7DZqiQsup77T26aiJSjZ5Uj7pmjXUq9FjeFpXgWQhL3CoWMhUBqkbRK5ER2
+  peer-b  Release escrow   pSXLPDPeQtBtPYU8c36LyMRQ5BfgzWCyGYGDntx9G4ydzvhQ3i2hXEG6fzahUzUQD95Ewtso3JcQsb7Qn3HhHoX
+  peer-a  received trade_settled → verified on-chain → SETTLED
+  ```
+
+  The release is `finalized` with no error, and the balances moved the way the
+  trade says they should: the buyer `1.0 → 1.1 SOL`, the seller
+  `1.0 → 0.89999 SOL` (0.1 plus fees). Both ledgers record the same release
+  signature as the proof.
 - **Matching across two peers** over real mDNS + gossipsub: each mirrored the
-  other's order, both computed 9500 cents independently, the buyer parked in
-  `WAITING` and the seller attempted the real devnet escrow.
+  other's order and both computed 9500 cents independently.
 - **Relay round trip**, with one peer's RPC black-holed:
 
   ```
@@ -225,6 +285,11 @@ npm run bindings:check
   that price is outside the buyer's ceiling, so it is discarded and the
   deterministic 95.00 stands — the guardrail doing its job.
 
-Not yet verified end-to-end: a **successful** on-chain settlement, and
-therefore the settled-state UI and the explorer link. Both need a funded devnet
-wallet (the airdrop above).
+Not yet verified: the **settled-state UI** — the DEAL panel and the explorer
+button — was not opened during this run, only the ledgers and the chain were
+checked.
+
+The Boost fixes above are covered by unit tests (the mint travels with the
+seller's side, a listing above the ceiling is refused, a pair still matches when
+the seller names no price) but the purchase itself is **not yet verified
+on-chain** — claiming a demo boost and buying it both need a funded wallet.

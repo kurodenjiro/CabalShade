@@ -271,13 +271,13 @@ pub fn run() {
                                             .all()
                                             .into_iter()
                                             .filter(|entry| entry.is_local() && entry.is_open())
-                                            .map(|entry| (entry.id.to_string(), entry.draft.clone()))
+                                            .map(|entry| (entry.id.to_string(), entry.draft.clone(), entry.boost_mint.as_deref().map(str::to_string)))
                                             .collect::<Vec<_>>();
                                         let wallet = bridge.lock().await.get_primary_address();
-                                        for (intent_id, draft) in orders {
+                                        for (intent_id, draft, boost_mint) in orders {
                                             let _ = mesh.publish(crate::mesh::PrivacyIntent {
                                                 intent_type: "trade".into(),
-                                                payload: serde_json::to_string(&crate::commands::MeshTradePayload { draft, wallet: wallet.clone(), intent_id }).unwrap_or_default(),
+                                                payload: serde_json::to_string(&crate::commands::MeshTradePayload { draft, wallet: wallet.clone(), intent_id, boost_mint }).unwrap_or_default(),
                                                 encrypted: true,
                                                 relay_path: vec!["origin_node".into()],
                                                 relay_fee: None,
@@ -303,6 +303,21 @@ pub fn run() {
                                             status.clone(),
                                             tx_hash.clone(),
                                         );
+                                        if status == "confirmed" {
+                                            if let Some(signature) = tx_hash.clone() {
+                                                crate::deal::on_boost_relay_confirmed(
+                                                    crate::deal::DealContext {
+                                                        app: handle_clone.clone(),
+                                                        bridge: auto_settle_bridge.clone(),
+                                                        matcher: auto_settle_matcher.clone(),
+                                                        mesh: Some(deal_mesh.clone()),
+                                                        intents: remote_intents.clone(),
+                                                    },
+                                                    queue_id.clone(),
+                                                    signature,
+                                                );
+                                            }
+                                        }
                                     }
                                     _ => {}
                                 }
@@ -339,6 +354,22 @@ pub fn run() {
                                         continue;
                                     }
 
+                                    if intent.intent_type == "boost_purchase_request" {
+                                        if let Ok(request) = serde_json::from_str::<crate::deal::BoostPurchaseRequest>(&intent.payload) {
+                                            crate::deal::on_boost_purchase_request(context(), request);
+                                        }
+                                        let _ = handle_clone.emit("mesh-event", event);
+                                        continue;
+                                    }
+
+                                    if intent.intent_type == "boost_trade_settled" {
+                                        if let Ok(announcement) = serde_json::from_str::<crate::deal::BoostTradeSettled>(&intent.payload) {
+                                            crate::deal::on_boost_trade_settled(context(), announcement);
+                                        }
+                                        let _ = handle_clone.emit("mesh-event", event);
+                                        continue;
+                                    }
+
                                     if let Ok(payload) = serde_json::from_str::<crate::commands::MeshTradePayload>(&intent.payload) {
                                         let remote_wallet = payload.wallet;
                                         if remote_wallet.is_empty() { continue; }
@@ -360,6 +391,7 @@ pub fn run() {
                                             },
                                             now,
                                         );
+                                        store.set_boost_mint(&remote_id, payload.boost_mint);
                                         let _ = store.transition(&remote_id, cabal_core::IntentStatus::Broadcast { route_len: intent.relay_path.len().min(u8::MAX as usize) as u8 }, now);
                                         let paired = match store.find_counterparty(&remote_id) {
                                             Some((other_id, terms))
@@ -423,10 +455,22 @@ pub fn run() {
                                 // deal. `check_rpc_reachable` is bounded at four seconds.
                                 let has_queue = !resume_bridge.lock().await.get_pending_relay_txs().is_empty();
                                 if has_queue && resume_bridge.lock().await.check_rpc_reachable().await {
-                                    match resume_bridge.lock().await.drain_pending().await {
-                                        Ok(0) => {}
-                                        Ok(count) => tracing::info!(count, "submitted queued transactions after reconnect"),
-                                        Err(error) => tracing::debug!(%error, "queue drain failed"),
+                                    let confirmed = resume_bridge.lock().await.drain_pending_confirmed().await;
+                                    if !confirmed.is_empty() {
+                                        tracing::info!(count = confirmed.len(), "submitted queued transactions after reconnect");
+                                    }
+                                    // A queued Boost purchase settles a deal, and this
+                                    // device just submitted it. Without this the trade
+                                    // would only close if some peer happened to relay
+                                    // the same transaction first.
+                                    for tx in confirmed {
+                                        if let Some(signature) = tx.tx_hash {
+                                            crate::deal::on_boost_relay_confirmed(
+                                                chase_context.clone(),
+                                                tx.id,
+                                                signature,
+                                            );
+                                        }
                                     }
                                 }
 

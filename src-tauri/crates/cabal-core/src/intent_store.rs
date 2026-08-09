@@ -75,6 +75,12 @@ pub struct StoredIntent {
     /// Set once this intent is paired with its opposite side.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub matched: Option<MatchRecord>,
+    /// The concrete one-of-one SPL mint for a Boost seller's listing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boost_mint: Option<Box<str>>,
+    /// The buyer's signed marketplace purchase waiting for mesh relay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_queue_id: Option<Box<str>>,
 }
 
 impl StoredIntent {
@@ -173,6 +179,8 @@ impl IntentStore {
             updated_at: now,
             origin: None,
             matched: None,
+            boost_mint: None,
+            relay_queue_id: None,
         };
         self.intents.insert(id.clone(), stored);
         id
@@ -196,6 +204,23 @@ impl IntentStore {
     #[must_use]
     pub fn get(&self, id: &IntentId) -> Option<&StoredIntent> {
         self.intents.get(id)
+    }
+
+    pub fn set_boost_mint(&mut self, id: &IntentId, mint: Option<String>) {
+        if let Some(intent) = self.intents.get_mut(id) {
+            intent.boost_mint = mint.filter(|mint| !mint.is_empty()).map(String::into_boxed_str);
+        }
+    }
+
+    pub fn set_relay_queue_id(&mut self, id: &IntentId, queue_id: String) {
+        if let Some(intent) = self.intents.get_mut(id) {
+            intent.relay_queue_id = Some(queue_id.into_boxed_str());
+        }
+    }
+
+    #[must_use]
+    pub fn by_relay_queue_id(&self, queue_id: &str) -> Option<&StoredIntent> {
+        self.intents.values().find(|intent| intent.relay_queue_id.as_deref() == Some(queue_id))
     }
 
     /// Looks a mirrored order up by the id its originating peer uses.

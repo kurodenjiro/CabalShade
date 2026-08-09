@@ -26,6 +26,8 @@ pub(crate) struct MeshTradePayload {
     /// `default` so an order from an older peer still arrives, unmatched.
     #[serde(default)]
     pub intent_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boost_mint: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -744,6 +746,8 @@ pub struct BroadcastDraftInput {
     pub amount: String,
     pub mode: cabal_core::ExecutionMode,
     pub privacy: cabal_core::PrivacyLevel,
+    #[serde(default)]
+    pub boost_mint: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -860,6 +864,7 @@ pub async fn broadcast_intent(
 ) -> Result<cabal_core::IntentId, AppError> {
     use cabal_core::IntentStatus;
 
+    let boost_mint = draft.boost_mint.clone();
     let draft = parse_broadcast_draft(draft)?;
 
     let services = state.services()?;
@@ -871,6 +876,7 @@ pub async fn broadcast_intent(
         store
             .transition(&id, IntentStatus::Broadcast { route_len: 1 }, now)
             .map_err(|_| AppError::InvalidIntent { field: "status", reason: crate::error::InvalidReason::OutOfRange })?;
+        store.set_boost_mint(&id, boost_mint.clone());
         id
     };
 
@@ -899,6 +905,7 @@ pub async fn broadcast_intent(
                 draft: draft.clone(),
                 wallet,
                 intent_id: id.to_string(),
+                boost_mint,
             })
             .unwrap_or_default(),
             encrypted: true,

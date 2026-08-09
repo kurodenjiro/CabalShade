@@ -10,6 +10,18 @@ const errorText = (error: unknown): string => {
   try { return JSON.stringify(error); } catch { return "Unknown error"; }
 };
 
+const solPrice = (lamports: string | null): string | null => {
+  if (!lamports) return null;
+  try {
+    const raw = BigInt(lamports);
+    const whole = raw / 1_000_000_000n;
+    const fraction = (raw % 1_000_000_000n).toString().padStart(9, "0").replace(/0+$/, "");
+    return `${whole}${fraction ? `.${fraction}` : ""} SOL`;
+  } catch {
+    return null;
+  }
+};
+
 /**
  * SPL boost inventory and mesh marketplace affordances.
  *
@@ -83,6 +95,7 @@ export function BoostMarketplace() {
           amount: "1",
           mode: "SHARK",
           privacy: "MEDIUM",
+          boostMint: mint,
         },
       });
       setMessage(`NFT LISTED + MESH INTENT BROADCAST — ${id}.`);
@@ -98,7 +111,7 @@ export function BoostMarketplace() {
     <Panel label="SPL BOOST NFT / MESH MARKET">
       <div style={{ display: "flex", flexDirection: "column" }}>
         <div style={{ padding: "var(--space-5) var(--space-6)", color: "var(--text-muted)", fontSize: "var(--text-sm)" }}>
-          Only boost items are tradeable. Using one burns the SPL NFT. Sellers list through the mesh; buyers purchase a listed item here.
+          Only boost items are tradeable. Using one burns the SPL NFT. Sellers list here, then buyers create a BUY BOOST NFT intent in New so both agents can match and relay the signed purchase.
         </div>
         <div style={{ padding: "0 var(--space-6) var(--space-5)", display: "flex", gap: "var(--space-3)" }}>
           <Button tone="secondary" size="sm" className="cm-touch" disabled={busy === "demo"} onClick={claimDemo}>CLAIM DEMO BOOST</Button>
@@ -108,21 +121,95 @@ export function BoostMarketplace() {
           <div style={{ padding: "var(--space-8) var(--space-6)", textAlign: "center", color: "var(--text-muted)" }}>
             NO BOOST NFTS DETECTED. ASK THE OTHER PEER TO SELL VIA MESH, THEN REFRESH MARKET.
           </div>
-        ) : items.map((item) => {
-          const expired = boostExpired(item);
-          return (
-            <div key={item.mint} className="cm-row" style={{ display: "flex", alignItems: "center", gap: "var(--space-4)", padding: "var(--space-5) var(--space-6)", borderTop: "var(--border-hairline-style)" }}>
-              <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: "var(--space-2)" }}>
-                <span style={{ fontFamily: "var(--type-heading-family)", color: "var(--text-primary)" }}>{item.name}</span>
-                <span style={{ fontFamily: "var(--type-label-family)", fontSize: "var(--text-2xs)", color: expired ? "var(--text-alert)" : "var(--text-muted)" }}>{boostLabel(item)}</span>
-              </div>
-              {item.owned && !item.listed && !expired && <Button tone="primary" size="sm" className="cm-touch" disabled={busy === item.mint} onClick={() => useBoost(item.mint)}>BURN</Button>}
-              {item.owned && !item.listed && !expired && <Button tone="secondary" size="sm" className="cm-touch" disabled={busy === item.mint} onClick={() => listBoost(item.mint)}>SELL VIA MESH</Button>}
-              {item.listed && <span style={{ fontSize: "var(--text-2xs)", color: "var(--text-muted)" }}>LISTED</span>}
-              {!item.owned && item.listed && <span style={{ fontSize: "var(--text-2xs)", color: "var(--accent-cyan)" }}>LISTED · MATCH VIA BUY INTENT</span>}
-            </div>
-          );
-        })}
+        ) : (
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+              gap: "var(--space-4)",
+              padding: "var(--space-5) var(--space-6)",
+              borderTop: "var(--border-hairline-style)",
+            }}
+          >
+            {items.map((item) => {
+              const expired = boostExpired(item);
+              const listingPrice = solPrice(item.priceLamports);
+              return (
+                <div
+                  key={item.mint}
+                  style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: "var(--space-3)",
+                    padding: "var(--space-4)",
+                    border: "var(--border-hairline-style)",
+                    minWidth: 0,
+                  }}
+                >
+                  <div
+                    style={{
+                      display: "grid",
+                      placeItems: "center",
+                      aspectRatio: "1",
+                      background: "var(--surface-page)",
+                      border: "var(--border-hairline-style)",
+                      opacity: expired ? 0.4 : 1,
+                    }}
+                  >
+                    <img
+                      src="/ds-assets/intent/boost-nft.png"
+                      alt=""
+                      className="cm-pixel"
+                      style={{ width: "60%", height: "60%", objectFit: "contain" }}
+                    />
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-2)" }}>
+                    <span
+                      style={{
+                        fontFamily: "var(--type-heading-family)",
+                        color: "var(--text-primary)",
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      {item.name}
+                    </span>
+                    <span
+                      style={{
+                        fontFamily: "var(--type-label-family)",
+                        fontSize: "var(--text-2xs)",
+                        color: expired ? "var(--text-alert)" : "var(--text-muted)",
+                      }}
+                    >
+                      {boostLabel(item)}
+                    </span>
+                    {item.listed && listingPrice && (
+                      <span style={{ fontFamily: "var(--type-label-family)", fontSize: "var(--text-2xs)", color: "var(--accent-cyan)" }}>
+                        LIST PRICE · {listingPrice}
+                      </span>
+                    )}
+                    {item.listed && (
+                      <span style={{ fontSize: "var(--text-2xs)", color: item.owned ? "var(--text-muted)" : "var(--accent-cyan)" }}>
+                        {item.owned ? "LISTED" : "LISTED · CREATE BUY INTENT"}
+                      </span>
+                    )}
+                  </div>
+                  {item.owned && !item.listed && !expired && (
+                    <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-2)" }}>
+                      <Button tone="primary" size="sm" block className="cm-touch" disabled={busy === item.mint} onClick={() => useBoost(item.mint)}>
+                        BURN
+                      </Button>
+                      <Button tone="secondary" size="sm" block className="cm-touch" disabled={busy === item.mint} onClick={() => listBoost(item.mint)}>
+                        SELL VIA MESH
+                      </Button>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
         {message && <div role="status" style={{ padding: "var(--space-4) var(--space-6)", color: "var(--text-secondary)", fontSize: "var(--text-xs)" }}>{message}</div>}
       </div>
     </Panel>
