@@ -34,10 +34,12 @@ export function Intents({
   tab,
   onTabChange,
   onCompose,
+  onOpen,
 }: {
   tab: IntentTab;
   onTabChange: (tab: IntentTab) => void;
   onCompose: () => void;
+  onOpen: (id: string) => void;
 }) {
   const [intents, setIntents] = useState<IntentView[] | null>(null);
 
@@ -75,6 +77,14 @@ export function Intents({
     return () => {
       if (unlisten) unlisten();
     };
+  }, [tab]);
+
+  // A peer can deliver an intent before this view has attached its event
+  // listener. Polling the persisted ledger keeps the matched status visible
+  // in both demo windows without relying on that timing.
+  useEffect(() => {
+    const timer = window.setInterval(fetchIntents, 2_000);
+    return () => window.clearInterval(timer);
   }, [tab]);
 
   const empty = EMPTY[tab];
@@ -149,7 +159,7 @@ export function Intents({
       ) : (
         <>
           {intents.map((intent) => (
-            <IntentRow key={intent.id} intent={intent} />
+            <IntentRow key={intent.id} intent={intent} onOpen={() => onOpen(intent.id)} />
           ))}
           <Button tone="secondary" size="lg" block className="cm-touch" onClick={onCompose}>
             + NEW INTENT
@@ -160,7 +170,19 @@ export function Intents({
   );
 }
 
-function IntentRow({ intent }: { intent: IntentView }) {
+/**
+ * The status word as the board says it.
+ *
+ * `NEGOTIATING` is the lifecycle's name for "paired, agreeing terms", which
+ * reads as indecision on a row that has in fact found its counterparty —
+ * MATCHED is the fact the user is waiting for.
+ */
+const STATUS_WORD: Record<string, string> = {
+  NEGOTIATING: "MATCHED",
+  FINDING_ROUTE: "ROUTING",
+};
+
+function IntentRow({ intent, onOpen }: { intent: IntentView; onOpen: () => void }) {
   const status = intent.status.status;
   const tone =
     status === "SETTLED"
@@ -170,12 +192,19 @@ function IntentRow({ intent }: { intent: IntentView }) {
         : status === "WAITING"
           ? "idle"
           : "info";
+  // A matched row's whole point is who and at what price, so it says both
+  // rather than making the user open the detail to find out.
+  const dealLine = intent.counterparty
+    ? `${intent.counterparty}${intent.price ? ` · ${intent.price}` : ""}`
+    : null;
 
   return (
     <Panel>
-      <div
+      <button
+        type="button"
+        onClick={onOpen}
         className="cm-row"
-        style={{ padding: "var(--space-6)", display: "flex", flexDirection: "column", gap: "var(--space-5)" }}
+        style={{ width: "100%", padding: "var(--space-6)", display: "flex", flexDirection: "column", gap: "var(--space-5)", background: "none", border: "none", cursor: "pointer", textAlign: "left" }}
       >
         <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-3)" }}>
           <span
@@ -198,12 +227,42 @@ function IntentRow({ intent }: { intent: IntentView }) {
           >
             {intent.subtitle}
           </span>
-          {intent.badge ? (
-            <Badge tone="quiet" size="sm">
-              {intent.badge}
-            </Badge>
-          ) : null}
+          <div style={{ display: "flex", gap: "var(--space-3)", flexWrap: "wrap" }}>
+            {intent.badge ? (
+              <Badge tone="quiet" size="sm">
+                {intent.badge}
+              </Badge>
+            ) : null}
+            {/* A mirrored peer order sits in the same list as the user's own.
+                Saying whose it is prevents reading someone else's exposure as
+                one's own position. */}
+            {intent.origin ? (
+              <Badge tone="quiet" size="sm">
+                PEER {intent.origin}
+              </Badge>
+            ) : null}
+          </div>
         </div>
+
+        {dealLine ? (
+          <div
+            aria-label="Matched counterparty"
+            style={{
+              display: "grid",
+              gridTemplateColumns: "auto 1fr",
+              gap: "var(--space-3)",
+              alignItems: "center",
+              padding: "var(--space-3) var(--space-4)",
+              borderLeft: "var(--border-width-thick) solid var(--accent-cyan)",
+              background: "linear-gradient(90deg, rgba(0,255,255,.10), transparent)",
+            }}
+          >
+            <span aria-hidden="true" style={{ color: "var(--accent-cyan)", fontFamily: "var(--type-data-family)", fontSize: "var(--text-sm)" }}>◆</span>
+            <span style={{ fontFamily: "var(--type-label-family)", fontSize: "var(--text-2xs)", letterSpacing: "var(--tracking-widest)", color: "var(--text-primary)" }}>
+              {status === "SETTLED" ? "SETTLED WITH" : "MATCHED WITH"} {dealLine}
+            </span>
+          </div>
+        ) : null}
 
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "var(--space-5)" }}>
           <span
@@ -227,7 +286,7 @@ function IntentRow({ intent }: { intent: IntentView }) {
                 color: "var(--text-secondary)",
               }}
             >
-              {status.replace("_", " ")}
+              {STATUS_WORD[status] ?? status.replace("_", " ")}
             </span>
           </span>
           <span
@@ -240,7 +299,7 @@ function IntentRow({ intent }: { intent: IntentView }) {
             {intent.elapsed}
           </span>
         </div>
-      </div>
+      </button>
     </Panel>
   );
 }

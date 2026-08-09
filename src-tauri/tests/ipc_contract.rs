@@ -241,12 +241,9 @@ fn content_analysis_shape() {
 #[test]
 fn match_result_shape() {
     insta::assert_snapshot!(shape(&MatchResult {
-        listing_id: 7,
-        seller: "0xfF8dd6dbB7B97b44044573cFE843dE1F463637a9".into(),
+        seller: "GyzdBSo87y5vT4oyoBCAdeT7hSz4C2ihj89QrVGCpdRa".into(),
         description: "AI compute credit".into(),
-        price_avax: "0.05".into(),
-        price_wei: "50000000000000000".into(),
-        token_id: 42,
+        price_sol: "0.05".into(),
         reason: "matches intent and is under the ceiling".into(),
     }));
 }

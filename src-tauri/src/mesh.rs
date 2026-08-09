@@ -369,7 +369,12 @@ impl MeshNetwork {
                 relay: relay_behaviour,
                 dcutr: dcutr::Behaviour::new(key.public().to_peer_id()),
             })?
-            .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
+            // A mesh peer is useful while the user is deciding whether to
+            // trade, not only while bytes happen to be in flight. Sixty
+            // seconds made an otherwise healthy two-node demo disappear from
+            // the map between actions. Ping maintains the connection; this is
+            // only the last-resort timeout for genuinely dead transports.
+            .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(15 * 60)))
             .build();
 
         Ok(MeshNetwork {
@@ -489,9 +494,18 @@ impl MeshNetwork {
                             self.peers.connected(peer_id, transport);
                             tracing::info!(peer_id = %peer_id, ?transport, "connection established");
                         }
-                        SwarmEvent::ConnectionClosed { peer_id, .. } => {
-                            self.peers.disconnected(&peer_id);
-                            tracing::info!(peer_id = %peer_id, "connection closed");
+                        SwarmEvent::ConnectionClosed { peer_id, num_established, .. } => {
+                            // libp2p may temporarily have parallel direct and
+                            // relayed connections to one peer. Do not make the
+                            // node vanish from the UI merely because one of
+                            // those paths closed; remove it only after the
+                            // final connection is gone.
+                            if num_established == 0 {
+                                self.peers.disconnected(&peer_id);
+                                tracing::info!(peer_id = %peer_id, "last connection closed");
+                            } else {
+                                tracing::debug!(peer_id = %peer_id, num_established, "connection closed; peer remains reachable");
+                            }
                         }
                         SwarmEvent::Behaviour(event) => match event {
                             MeshBehaviourEvent::Ping(ping_event) => {
@@ -502,6 +516,13 @@ impl MeshNetwork {
                             MeshBehaviourEvent::Mdns(mdns::Event::Discovered(list)) => {
                                 for (peer_id, multiaddr) in list {
                                     tracing::info!(peer_id = %peer_id, address = %multiaddr, "peer discovered");
+                                    // Discovery only tells gossipsub about a peer; it does not
+                                    // establish a transport connection. Without this dial, two
+                                    // desktop instances on the same LAN remain at zero peers and
+                                    // broadcasts can never be delivered.
+                                    if let Err(error) = self.swarm.dial(multiaddr.clone()) {
+                                        tracing::warn!(peer_id = %peer_id, %error, "could not dial discovered peer");
+                                    }
                                     self.swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
                                     let _ = tx.send(MeshEvent::PeerDiscovered {
                                         peer_id: peer_id.to_string(),
@@ -628,7 +649,18 @@ impl MeshNetwork {
             return Err("Integrity check failed: Malformed relay path".into());
         }
 
-        let payload = serde_json::to_vec(&intent)?;
+        // Stamped so that re-announcing the same thing actually leaves the
+        // node. The message id above is a hash of the payload, so a byte-identical
+        // second publish is discarded as a duplicate — which is right for
+        // gossip forwarding and wrong for every deliberate repeat this app
+        // makes: re-offering an open order to a peer that has just appeared,
+        // re-announcing a settlement to a counterparty that was away, asking
+        // again whether a trade settled. Receivers ignore the field.
+        let mut payload = serde_json::to_value(&intent)?;
+        if let Some(envelope) = payload.as_object_mut() {
+            envelope.insert("nonce".into(), serde_json::json!(Self::next_nonce()));
+        }
+        let payload = serde_json::to_vec(&payload)?;
         match self.swarm
             .behaviour_mut()
             .gossipsub
@@ -664,6 +696,19 @@ impl MeshNetwork {
             Err(e) => Err(Box::new(e))
         }
     }
+    /// A value no other publish from this process will reuse. Wall-clock
+    /// milliseconds alone would collide for two publishes in the same
+    /// millisecond — which is exactly what re-announcing a batch of orders
+    /// does — so a counter is mixed in.
+    fn next_nonce() -> u64 {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as u64);
+        millis.wrapping_mul(1_000) + COUNTER.fetch_add(1, Ordering::Relaxed) % 1_000
+    }
+
     pub fn verify_relay_integrity(intent: &PrivacyIntent) -> bool {
         // Basic integrity check:
         // 1. Relay path should not be empty (should contain at least sender)
