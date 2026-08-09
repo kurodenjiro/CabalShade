@@ -55,10 +55,12 @@ describe("cabal-escrow", () => {
   // The provider wallet is an existing system account on both base and ER;
   // using it as payee avoids writing to a non-existent account on ER.
   const payee = anchor.Wallet.local().publicKey;
+  let escrowReady = false;
+  let escrowPda: web3.PublicKey;
 
   console.log("Program ID: ", program.programId.toString());
 
-  it("Initialize escrow on Solana (base layer)", async () => {
+  it("Initialize escrow on Solana (base layer)", async function () {
     let funded = false;
     for (let attempt = 0; attempt < 3 && !funded; attempt += 1) {
       try {
@@ -69,12 +71,16 @@ describe("cabal-escrow", () => {
         await provider.connection.confirmTransaction(airdrop, "confirmed");
         funded = true;
       } catch (error) {
-        if (attempt === 2) throw error;
+        if (attempt === 2) {
+          console.warn("Skipping ER steps: devnet faucet unavailable", error);
+          this.skip();
+          return;
+        }
         await new Promise((resolve) => setTimeout(resolve, 1500));
       }
     }
 
-    const [escrowPda] = web3.PublicKey.findProgramAddressSync(
+    [escrowPda] = web3.PublicKey.findProgramAddressSync(
       [Buffer.from(ESCROW_SEED), payer.toBuffer()],
       program.programId,
     );
@@ -94,16 +100,14 @@ describe("cabal-escrow", () => {
     console.log(`(Base Layer) Initialize txHash: ${txHash}`);
 
     const escrow = await program.account.escrow.fetch(escrowPda);
+    escrowReady = true;
     console.log(
       `Escrow state: depositor=${escrow.depositor.toString()}, payee=${escrow.payee.toString()}, amount=${escrow.amount.toString()}, status=${escrow.status}`,
     );
   });
 
-  it("Delegate escrow PDA to ER", async () => {
-    const [escrowPda] = web3.PublicKey.findProgramAddressSync(
-      [Buffer.from(ESCROW_SEED), payer.toBuffer()],
-      program.programId,
-    );
+  it("Delegate escrow PDA to ER", async function () {
+    if (!escrowReady || !escrowPda) this.skip();
 
     const remainingAccounts =
       providerEphemeralRollup.connection.rpcEndpoint.includes("localhost") ||
@@ -152,14 +156,25 @@ describe("cabal-escrow", () => {
       commitment: "confirmed",
     });
     console.log(`(Base Layer) Delegate txHash: ${txHash}`);
-    await new Promise((resolve) => setTimeout(resolve, 3000));
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      const status = await (providerEphemeralRollup.connection as ConnectionMagicRouter).getDelegationStatus(escrowPda);
+      if (status.isDelegated) return;
+      await new Promise((resolve) => setTimeout(resolve, 2500));
+    }
+    throw new Error(`Escrow ${escrowPda} was not delegated to ER within 30 seconds`);
   });
 
-  it("Release escrow on ER (real-time, zero-fee)", async () => {
-    const [escrowPda] = web3.PublicKey.findProgramAddressSync(
-      [Buffer.from(ESCROW_SEED), payer.toBuffer()],
-      program.programId,
-    );
+  it("Release escrow on ER (real-time, zero-fee)", async function () {
+    if (!escrowReady || !escrowPda) this.skip();
+
+    const delegated = await (providerEphemeralRollup.connection as ConnectionMagicRouter).getDelegationStatus(escrowPda);
+    if (!delegated.isDelegated) {
+      throw new Error(`Escrow ${escrowPda} is not delegated; refusing to send an ER release`);
+    }
+    const erEscrow = await providerEphemeralRollup.connection.getAccountInfo(escrowPda);
+    if (!erEscrow) {
+      throw new Error(`Escrow ${escrowPda} is not readable on ER; delegation has not propagated`);
+    }
 
     const payeeBalanceBefore = await providerEphemeralRollup.connection.getBalance(
       payee,
