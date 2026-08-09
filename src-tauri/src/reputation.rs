@@ -1,34 +1,34 @@
-//! The reputation score — currently mocked, deliberately and in one place.
+//! The reputation score — derived from real demonstrated behaviour.
 //!
-//! # The decision this module records (ticket 03)
+//! # From mock to signal (replaces ticket 03's mock, closes ticket 39)
 //!
-//! The prototype showed `REPUTATION SCORE 87.6 (+5.3%)` on home and profile as
-//! a constant. No signal behind it exists anywhere in the codebase, and until
-//! now both screens rendered an em dash rather than invent one.
+//! The prototype shipped a constant and later a hash of the node identifier
+//! (ticket 03) so the screens read as designed before any signal existed. That
+//! was honest about being a placeholder but the number it showed was not a
+//! claim the system could back: a peer with zero relays scored the same as a
+//! peer with a hundred.
 //!
-//! The call was made to ship a **mock value** so the screens read as designed
-//! before a real signal exists. That is worth naming plainly rather than
-//! burying: the brand's copy rules treat exact figures as a trust signal, and a
-//! derived-from-nothing number is a claim the system cannot back. The
-//! mitigations are that it lives here and nowhere else, that it is derived
-//! rather than random, and that ticket 39 exists to replace it.
+//! Reputation now starts from **measured behaviour**, all of which already
+//! existed in the app:
 //!
-//! # Why derived from the node identifier rather than random
+//! - transactions this node relayed for peers (relay history, persisted)
+//! - bytes relayed through the mesh topic (the real counter)
+//! - intents settled on-chain (the intent ledger's terminal states)
+//! - the best observed peer latency (from the ping behaviour)
 //!
-//! Home polls every five seconds and profile does the same. A score sampled per
-//! call would visibly jitter — 87.6, then 64.2, then 91.0 — which does not read
-//! as a mock, it reads as a bug. Deriving from the peer identifier makes the
-//! value stable for the lifetime of an identity and different between nodes,
-//! which is what a demo across two devices needs.
+//! # Why the score still does not move between polls
 //!
-//! # Why offline still renders an em dash
-//!
-//! With no mesh there is no peer identifier, so there is nothing to derive
-//! from. Falling back to a fixed number there would put the same score on every
-//! device in every screenshot. [`Reputation::of`] returns `None` and both
-//! screens keep the honest placeholder they already had.
+//! Home polls every five seconds. A score that changed because the counters
+//! changed a little between polls would read as a bug — the brand's copy rules
+//! treat exact figures as a trust signal. The score is therefore derived from
+//! the *cumulative* counters, and the delta is measured against a baseline the
+//! first reading persists for this node. The value is stable within a session,
+//! moves only when behaviour actually changes, and never fabricates a
+//! period-over-period number the app has not observed.
 
-/// A reputation reading: the score and its period-over-period delta.
+use serde::{Deserialize, Serialize};
+
+/// A reputation reading: the score and its change from the node's baseline.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Reputation {
     /// `60.0` to `99.9`.
@@ -37,26 +37,52 @@ pub struct Reputation {
     pub delta_percent: f64,
 }
 
+/// What one node has actually done, so reputation can be a claim about
+/// behaviour rather than an identifier hash.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Signals {
+    /// Transactions relayed to the chain for other peers.
+    pub relayed_tx_count: u64,
+    /// Bytes relayed through the mesh topic.
+    pub relay_bytes: u64,
+    /// Intents that reached a terminal settled state.
+    pub settled_deals: u64,
+    /// Best observed peer round-trip time. `None` before the first ping.
+    pub best_peer_latency_ms: Option<u16>,
+}
+
 impl Reputation {
-    /// The mock reading for a node, or `None` when there is no node to derive
-    /// from.
+    /// The score for a node's demonstrated behaviour, or `None` when there is
+    /// no mesh to measure.
     ///
     /// An empty or placeholder identifier means the mesh is not up yet, which
     /// is a genuinely unmeasured state rather than one to fill in.
     #[must_use]
-    pub fn of(peer_id: &str) -> Option<Self> {
+    pub fn of(peer_id: &str, signals: Signals) -> Option<Self> {
         if peer_id.is_empty() || peer_id == "—" {
             return None;
         }
 
-        let hash = fnv1a(peer_id.as_bytes());
+        // Base + demonstrated behaviour, each contribution capped so no single
+        // activity can dominate the band.
+        let mut score = 60.0
+            + (signals.relayed_tx_count.saturating_mul(6)).min(24) as f64
+            + (signals.settled_deals.saturating_mul(4)).min(12) as f64
+            + (signals.relay_bytes.saturating_div(1024)).min(6) as f64;
 
-        // Split the hash rather than hashing twice: the halves of a 64-bit
-        // FNV-1a are independent enough for a value nobody is meant to trust.
-        let score = 60.0 + f64::from((hash % 400) as u16) / 10.0;
-        let delta_percent = f64::from(((hash >> 32) % 199) as u16) / 10.0 - 9.9;
+        // Latency is a penalty, not a reward: a slow link reduces the score but
+        // an absent reading is unmeasured, not perfect.
+        if let Some(ms) = signals.best_peer_latency_ms {
+            match ms {
+                0..=100 => {}
+                101..=300 => score -= 2.0,
+                301..=500 => score -= 4.0,
+                _ => score -= 6.0,
+            }
+        }
 
-        Some(Self { score, delta_percent })
+        let score = score.clamp(60.0, 99.9);
+        Some(Self { score, delta_percent: 0.0 })
     }
 
     /// `87.6` — the score alone, for the home tile that carries its delta in a
@@ -74,57 +100,146 @@ impl Reputation {
     }
 }
 
-/// FNV-1a, 64-bit.
+/// The persisted baseline a delta is measured against.
 ///
-/// Not for security and not for distribution quality — it is here because it is
-/// four lines and needs no dependency, and the only requirement on it is that
-/// two peer identifiers rarely land on the same score.
-const fn fnv1a(bytes: &[u8]) -> u64 {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    let mut index = 0;
-    while index < bytes.len() {
-        hash ^= bytes[index] as u64;
-        hash = hash.wrapping_mul(0x100_0000_01b3);
-        index += 1;
+/// Written once per node identity when the score is first read, so the delta
+/// stays stable across five-second polls and only moves when behaviour does.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReputationBaseline {
+    /// The node this baseline belongs to.
+    pub node_id: String,
+    /// The score first observed for that node.
+    pub score: f64,
+}
+
+impl ReputationBaseline {
+    /// Reads the baseline for `node_id`, or writes a fresh one when absent.
+    #[must_use]
+    pub fn load_or_establish(
+        node_id: &str,
+        current_score: f64,
+        store: &cabal_store::JsonStore,
+    ) -> Option<Self> {
+        let stored: Option<ReputationBaseline> = store.load().ok();
+        match stored {
+            // Same node, keep the original baseline so the delta is against
+            // first sight, not the last poll.
+            Some(baseline) if baseline.node_id == node_id => Some(baseline),
+            // Different node (identity changed): re-anchor at the current score.
+            Some(_) => {
+                let baseline = Self { node_id: node_id.into(), score: current_score };
+                let _ = store.save(&baseline);
+                Some(baseline)
+            }
+            // No baseline yet: establish one at the current score, delta 0.
+            None => {
+                let baseline = Self { node_id: node_id.into(), score: current_score };
+                let _ = store.save(&baseline);
+                Some(baseline)
+            }
+        }
     }
-    hash
+
+    /// The delta of `current_score` against this baseline, clamped to the
+    /// display band.
+    #[must_use]
+    pub fn delta_percent(&self, current_score: f64) -> f64 {
+        let delta = ((current_score - self.score) / self.score) * 100.0;
+        delta.clamp(-9.9, 9.9)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn the_same_node_always_reads_the_same() {
-        // The property that makes this a mock rather than a bug: home and
-        // profile poll every five seconds, and a value that moved between polls
-        // would look like the score was broken.
-        let first = Reputation::of("12D3KooWExample").unwrap();
-        let second = Reputation::of("12D3KooWExample").unwrap();
-        assert_eq!(first, second);
-    }
-
-    #[test]
-    fn different_nodes_read_differently() {
-        let a = Reputation::of("12D3KooWAlpha").unwrap();
-        let b = Reputation::of("12D3KooWBravo").unwrap();
-        assert_ne!(a.score, b.score);
+    fn signals() -> Signals {
+        Signals::default()
     }
 
     #[test]
     fn no_node_means_no_score() {
         // Not a fallback constant: every device without a mesh would otherwise
         // show the same number in every screenshot.
-        assert!(Reputation::of("").is_none());
-        assert!(Reputation::of("—").is_none());
+        assert!(Reputation::of("", signals()).is_none());
+        assert!(Reputation::of("—", signals()).is_none());
+    }
+
+    #[test]
+    fn zero_activity_scores_at_the_floor() {
+        let reading = Reputation::of("12D3KooWIdle", signals()).unwrap();
+        assert_eq!(reading.score, 60.0);
+    }
+
+    #[test]
+    fn demonstrated_activity_raises_the_score() {
+        let idle = Reputation::of("12D3KooWAlpha", signals()).unwrap().score;
+        let active = Reputation::of(
+            "12D3KooWAlpha",
+            Signals {
+                relayed_tx_count: 4,
+                relay_bytes: 10 * 1024,
+                settled_deals: 3,
+                best_peer_latency_ms: None,
+            },
+        )
+        .unwrap()
+        .score;
+        assert!(active > idle, "activity must improve the score: {idle} -> {active}");
+    }
+
+    #[test]
+    fn contributions_are_capped_so_no_single_activity_dominates() {
+        // 1_000 relays would be +6000 without the cap; the band keeps it sane.
+        let reading = Reputation::of(
+            "12D3KooWWhale",
+            Signals {
+                relayed_tx_count: 1_000,
+                relay_bytes: 0,
+                settled_deals: 0,
+                best_peer_latency_ms: None,
+            },
+        )
+        .unwrap();
+        assert!((60.0..=99.9).contains(&reading.score));
+        // 60 + capped 24 = 84.
+        assert_eq!(reading.score, 84.0);
+    }
+
+    #[test]
+    fn slow_peers_are_penalised_not_rewarded() {
+        let fast = Reputation::of(
+            "12D3KooWFast",
+            Signals { relayed_tx_count: 2, ..Signals::default() },
+        )
+        .unwrap()
+        .score;
+        let slow = Reputation::of(
+            "12D3KooWSlow",
+            Signals {
+                relayed_tx_count: 2,
+                best_peer_latency_ms: Some(600),
+                ..Signals::default()
+            },
+        )
+        .unwrap()
+        .score;
+        assert!(fast > slow);
     }
 
     #[test]
     fn readings_stay_inside_their_bands() {
-        // Sampled rather than exhaustive, but wide enough to catch an off-by-one
-        // in either range expression.
-        for index in 0..2_000 {
-            let reading = Reputation::of(&format!("12D3KooW{index}")).unwrap();
+        for index in 0..2_000_u64 {
+            let reading = Reputation::of(
+                &format!("12D3KooW{index}"),
+                Signals {
+                    relayed_tx_count: index % 10,
+                    relay_bytes: (index % 5) * 1024,
+                    settled_deals: index % 3,
+                    best_peer_latency_ms: Some((index % 700) as u16),
+                },
+            )
+            .unwrap();
             assert!(
                 (60.0..=99.9).contains(&reading.score),
                 "score out of band: {}",
@@ -148,5 +263,31 @@ mod tests {
         // the colour, which reaches no screen reader.
         let falling = Reputation { score: 64.0, delta_percent: -3.0 };
         assert_eq!(falling.combined(), "64.0 (-3.0%)");
+    }
+
+    #[test]
+    fn baseline_keeps_the_delta_stable_against_first_sight() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = cabal_store::JsonStore::new(dir.path().join("reputation.json"));
+
+        let baseline = ReputationBaseline::load_or_establish("node-a", 80.0, &store).unwrap();
+        assert_eq!(baseline.score, 80.0);
+
+        // Later polls at a different score measure against the original 80.
+        let later = ReputationBaseline::load_or_establish("node-a", 84.0, &store).unwrap();
+        assert_eq!(later.score, 80.0);
+        assert_eq!(later.delta_percent(84.0), 5.0);
+    }
+
+    #[test]
+    fn a_new_identity_reanchors_the_baseline() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = cabal_store::JsonStore::new(dir.path().join("reputation.json"));
+
+        ReputationBaseline::load_or_establish("node-a", 80.0, &store).unwrap();
+        // Identity changed: re-anchor at the current score rather than inherit
+        // another node's baseline.
+        let rebased = ReputationBaseline::load_or_establish("node-b", 90.0, &store).unwrap();
+        assert_eq!(rebased.score, 90.0);
     }
 }

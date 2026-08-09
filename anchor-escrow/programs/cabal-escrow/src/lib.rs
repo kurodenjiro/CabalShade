@@ -3,7 +3,7 @@ use ephemeral_rollups_sdk::anchor::{commit, delegate, ephemeral};
 use ephemeral_rollups_sdk::cpi::DelegateConfig;
 use ephemeral_rollups_sdk::ephem::MagicIntentBundleBuilder;
 
-declare_id!("8iRQh7XsJmZ9g2yZxBfWQ8XqV9hV9tCbzvk3sHc4qGp1");
+declare_id!("7ajNjyCeMYaPNDecgxDLt5NAJVoey39DKGhcjiVRQSuq");
 
 pub const ESCROW_SEED: &[u8] = b"cabal-escrow";
 
@@ -135,9 +135,13 @@ pub mod cabal_escrow {
     /// deal can be released/refunded with real-time, zero-fee latency.
     /// A specific ER validator can be pinned via remaining accounts.
     pub fn delegate(ctx: Context<DelegateInput>) -> Result<()> {
+        // The escrow PDA is derived from both the static seed and the
+        // depositor key. Pass the complete seed tuple so the delegation CPI
+        // can sign for the PDA without a privilege-escalation failure.
+        let depositor = ctx.accounts.payer.key();
         ctx.accounts.delegate_pda(
             &ctx.accounts.payer,
-            &[ESCROW_SEED],
+            &[ESCROW_SEED, depositor.as_ref()],
             DelegateConfig {
                 // Optionally set a specific validator from the first remaining account
                 validator: ctx.remaining_accounts.first().map(|acc| acc.key()),
@@ -228,6 +232,7 @@ pub struct RefundEscrow<'info> {
 #[delegate]
 #[derive(Accounts)]
 pub struct DelegateInput<'info> {
+    #[account(mut)]
     pub payer: Signer<'info>,
     /// CHECK: The pda to delegate (ownership moves to the delegation program).
     #[account(mut, del)]

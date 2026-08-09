@@ -22,25 +22,29 @@ use bs58;
 use aes_gcm::aead::{OsRng, rand_core::RngCore};
 use tokio::time::{timeout, Duration};
 
-/// Solana devnet RPC. Kept under the legacy name so the frozen desktop config
-/// and `lib.rs` keep resolving it, but it now points at Solana, not Avalanche.
-pub const DEFAULT_AVAX_RPC_URL: &str = "https://api.devnet.solana.com";
+/// Solana devnet RPC default.
+pub const DEFAULT_SOLANA_RPC_URL: &str = "https://api.devnet.solana.com";
+
+/// Deprecated alias kept for the frozen desktop config and any external callers.
+#[deprecated(note = "use DEFAULT_SOLANA_RPC_URL")]
+pub const DEFAULT_AVAX_RPC_URL: &str = DEFAULT_SOLANA_RPC_URL;
 
 /// MagicBlock Magic Router (devnet) — auto-routes base-layer vs Ephemeral
 /// Rollup transactions.
 pub const DEFAULT_MAGIC_ROUTER_URL: &str = "https://devnet-router.magicblock.app/";
 
 /// The deployed `cabal_escrow` Anchor program on devnet.
-pub const ESCROW_PROGRAM_ID: &str = "8iRQh7XsJmZ9g2yZxBfWQ8XqV9hV9tCbzvk3sHc4qGp1";
+pub const ESCROW_PROGRAM_ID: &str = "7ajNjyCeMYaPNDecgxDLt5NAJVoey39DKGhcjiVRQSuq";
 
 /// Solana lamports per SOL.
 pub const LAMPORTS_PER_SOL: u64 = 1_000_000_000;
 
 /// Anchor instruction discriminators for `cabal_escrow` (sha256 of the
 /// qualified name, first 8 bytes). Matches the generated IDL.
-const IX_INITIALIZE_ESCROW: [u8; 8] = [0x8f, 0x21, 0x2e, 0x33, 0x4a, 0x1b, 0x0e, 0x5c];
-const IX_RELEASE: [u8; 8] = [0xa2, 0x4f, 0x1c, 0x63, 0x7b, 0x0e, 0x8d, 0x1a];
-const IX_REFUND: [u8; 8] = [0x9c, 0x5d, 0x12, 0x87, 0x3e, 0xab, 0x44, 0xf0];
+// Anchor instruction discriminators: sha256("global:<name>")[..8].
+const IX_INITIALIZE_ESCROW: [u8; 8] = [0xf3, 0xa0, 0x4d, 0x99, 0x0b, 0x5c, 0x30, 0xd1];
+const IX_RELEASE: [u8; 8] = [0xfd, 0xf9, 0x0f, 0xce, 0x1c, 0x7f, 0xc1, 0xf1];
+const IX_REFUND: [u8; 8] = [0x02, 0x60, 0xb7, 0xfb, 0x3f, 0xd0, 0x2e, 0x2e];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct IdentityRecord {
@@ -206,7 +210,8 @@ pub struct BlockchainBridge {
     pub relay_boost_path: PathBuf,
     pub rpc_url: String,
     pub current_session: Option<InstantSession>,
-    /// The Magic Router endpoint (auto-routes base layer vs ER).
+    /// Reserved for future MagicBlock Ephemeral Rollup delegation/commit/undelegate
+    /// calls. Base-layer transactions now route through [`Self::rpc_url`].
     pub router_url: String,
 }
 
@@ -224,7 +229,7 @@ pub struct SettledEscrow {
 
 impl BlockchainBridge {
     pub fn new(rpc_url_override: Option<String>) -> Self {
-        let rpc_url = rpc_url_override.unwrap_or_else(|| DEFAULT_AVAX_RPC_URL.to_string());
+        let rpc_url = rpc_url_override.unwrap_or_else(|| DEFAULT_SOLANA_RPC_URL.to_string());
 
         let app_dir = crate::app_paths::data_dir();
 
@@ -532,10 +537,7 @@ impl BlockchainBridge {
         let raw_bytes = hex::decode(hex_str)?;
         let tx: Transaction = bincode::deserialize(&raw_bytes)?;
 
-        let client = RpcClient::new_with_commitment(
-            self.router_url.clone(),
-            CommitmentConfig::confirmed(),
-        );
+        let client = self.rpc_client();
         let signature: Signature = client.send_transaction(&tx).await?;
         tracing::info!("✅ [Bridge] Relayed transaction confirmed. Tx: {}", signature);
         Ok(signature.to_string())
@@ -784,10 +786,7 @@ impl BlockchainBridge {
         };
 
         let online_result = timeout(Duration::from_secs(6), async {
-            let client = RpcClient::new_with_commitment(
-                self.router_url.clone(),
-                CommitmentConfig::confirmed(),
-            );
+            let client = self.rpc_client();
             let blockhash = client.get_latest_blockhash().await.map_err(|e| e.to_string())?;
             let message = Message::new(std::slice::from_ref(&instruction), Some(&keypair.pubkey()));
             let mut tx = Transaction::new_unsigned(message);
@@ -810,15 +809,52 @@ impl BlockchainBridge {
         }
     }
 
-    /// Builds the release/refund instruction for the depositor's escrow PDA.
-    fn escrow_action_instruction(&self, discriminator: &[u8; 8], caller: &Pubkey) -> Result<Instruction, Box<dyn Error>> {
+    /// Reads the payee stored in an escrow PDA. The escrow account data layout
+    /// is Anchor's account discriminator (8 bytes) followed by the Escrow
+    /// struct: depositor (32), payee (32), amount (8), expiry (8), status (1).
+    async fn escrow_payee(&self, escrow_pda: &Pubkey) -> Result<Pubkey, Box<dyn Error>> {
+        let client = self.rpc_client();
+        let account = client.get_account(escrow_pda).await?;
+        let data = account.data;
+        if data.len() < 72 {
+            return Err("escrow account data too short".into());
+        }
+        let bytes: [u8; 32] = data[40..72].try_into()?;
+        Ok(Pubkey::new_from_array(bytes))
+    }
+
+    /// Builds a release instruction for the depositor's escrow PDA, fetching
+    /// the payee from on-chain state so the instruction matches the program's
+    /// account list exactly.
+    async fn release_instruction(&self, caller: &Pubkey) -> Result<Instruction, Box<dyn Error>> {
+        let (escrow_pda, _bump) = self.escrow_pda(caller);
+        let payee = self.escrow_payee(&escrow_pda).await?;
+        let program_id = self.escrow_program_id();
+
+        let mut data = Vec::with_capacity(8);
+        data.extend_from_slice(&IX_RELEASE);
+
+        Ok(Instruction {
+            program_id,
+            accounts: vec![
+                solana_sdk::instruction::AccountMeta::new(escrow_pda, false),
+                solana_sdk::instruction::AccountMeta::new(*caller, true),
+                solana_sdk::instruction::AccountMeta::new(payee, false),
+            ],
+            data,
+        })
+    }
+
+    /// Builds a refund instruction for the depositor's escrow PDA. The third
+    /// account is the depositor receiving the refund, which is the caller.
+    fn refund_instruction(&self, caller: &Pubkey) -> Instruction {
         let (escrow_pda, _bump) = self.escrow_pda(caller);
         let program_id = self.escrow_program_id();
 
         let mut data = Vec::with_capacity(8);
-        data.extend_from_slice(discriminator);
+        data.extend_from_slice(&IX_REFUND);
 
-        Ok(Instruction {
+        Instruction {
             program_id,
             accounts: vec![
                 solana_sdk::instruction::AccountMeta::new(escrow_pda, false),
@@ -826,18 +862,15 @@ impl BlockchainBridge {
                 solana_sdk::instruction::AccountMeta::new(*caller, false),
             ],
             data,
-        })
+        }
     }
 
     pub async fn release_escrow(&self, _escrow_id: u64) -> Result<TxResult, Box<dyn Error>> {
         let keypair = self.primary_keypair()?;
-        let instruction = self.escrow_action_instruction(&IX_RELEASE, &keypair.pubkey())?;
+        let instruction = self.release_instruction(&keypair.pubkey()).await?;
 
         let online_result = timeout(Duration::from_secs(6), async {
-            let client = RpcClient::new_with_commitment(
-                self.router_url.clone(),
-                CommitmentConfig::confirmed(),
-            );
+            let client = self.rpc_client();
             let blockhash = client.get_latest_blockhash().await.map_err(|e| e.to_string())?;
             let message = Message::new(std::slice::from_ref(&instruction), Some(&keypair.pubkey()));
             let mut tx = Transaction::new_unsigned(message);
@@ -931,13 +964,10 @@ impl BlockchainBridge {
     /// informational — the refund targets the depositor's own escrow account.
     pub async fn refund_escrow(&self, _escrow_id: u64) -> Result<TxResult, Box<dyn Error>> {
         let keypair = self.primary_keypair()?;
-        let instruction = self.escrow_action_instruction(&IX_REFUND, &keypair.pubkey())?;
+        let instruction = self.refund_instruction(&keypair.pubkey());
 
         let online_result = timeout(Duration::from_secs(6), async {
-            let client = RpcClient::new_with_commitment(
-                self.router_url.clone(),
-                CommitmentConfig::confirmed(),
-            );
+            let client = self.rpc_client();
             let blockhash = client.get_latest_blockhash().await.map_err(|e| e.to_string())?;
             let message = Message::new(std::slice::from_ref(&instruction), Some(&keypair.pubkey()));
             let mut tx = Transaction::new_unsigned(message);
@@ -958,6 +988,69 @@ impl BlockchainBridge {
                 Ok(TxResult::Queued { queue_id: queued.id })
             }
         }
+    }
+
+    /// Fires the release leg for any escrow whose create transaction has
+    /// confirmed on-chain but whose release was never signed (the create was
+    /// queued offline for relay and has since landed). Returns the release
+    /// transactions that were newly submitted online (with their tx hashes) or
+    /// newly queued offline (with their raw bytes), so the caller can
+    /// re-broadcast a queued release for relay.
+    ///
+    /// Idempotent: a queued create is processed once, and a release that is
+    /// itself queued is not re-fires — the next tick sees it as a queued
+    /// release, not a create.
+    pub async fn resume_pending_settlements(&self) -> Vec<QueuedTx> {
+        let mut pending = self.load_pending_relay_txs();
+        let mut released = Vec::new();
+        let mut changed = false;
+
+        for tx in &mut pending {
+            if tx.status == "confirmed" && tx.summary == "Create escrow" {
+                match self.release_escrow(0).await {
+                    Ok(TxResult::Confirmed { id }) => {
+                        tracing::info!(id = %tx.id, "resumed settlement: create confirmed, release submitted");
+                        tx.status = "completed".to_string();
+                        tx.summary = "Create escrow (released)".to_string();
+                        changed = true;
+                        released.push(QueuedTx {
+                            id: format!("escrow-{id}"),
+                            raw_tx_hex: String::new(),
+                            summary: "Release escrow".into(),
+                            created_at: tx.created_at,
+                            status: "confirmed".into(),
+                            tx_hash: Some(format!("escrow-{id}")),
+                            reason: None,
+                            attempts: 0,
+                        });
+                    }
+                    Ok(TxResult::Queued { queue_id }) => {
+                        tracing::info!(id = %tx.id, "resumed settlement: release signed offline, queued for relay");
+                        tx.status = "completed".to_string();
+                        tx.summary = "Create escrow (release queued)".to_string();
+                        changed = true;
+                        if let Some(queued) = self
+                            .load_pending_relay_txs()
+                            .into_iter()
+                            .find(|q| q.id == queue_id)
+                        {
+                            released.push(queued);
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(id = %tx.id, %error, "resume settlement failed");
+                    }
+                }
+            }
+        }
+
+        if changed {
+            if let Err(e) = self.save_pending_relay_txs(&pending) {
+                tracing::warn!(error = %e, "failed to persist settlement resume state");
+            }
+        }
+
+        released
     }
 
     /// Reads the on-chain state of the depositor's escrow PDA (no signer).

@@ -1,8 +1,14 @@
 import * as anchor from "@coral-xyz/anchor";
 import { Program, web3 } from "@coral-xyz/anchor";
 import { CabalEscrow } from "../target/types/cabal_escrow";
-import { LAMPORTS_PER_SOL } from "@solana/web3.js";
-import { GetCommitmentSignature } from "@magicblock-labs/ephemeral-rollups-sdk";
+import { LAMPORTS_PER_SOL, sendAndConfirmTransaction } from "@solana/web3.js";
+import {
+  DELEGATION_PROGRAM_ID,
+  ConnectionMagicRouter,
+  delegateBufferPdaFromDelegatedAccountAndOwnerProgram,
+  delegationMetadataPdaFromDelegatedAccount,
+  delegationRecordPdaFromDelegatedAccount,
+} from "@magicblock-labs/ephemeral-rollups-sdk";
 
 const ESCROW_SEED = "cabal-escrow";
 const AMOUNT = 100_000_000; // 0.1 SOL in lamports
@@ -23,12 +29,12 @@ describe("cabal-escrow", () => {
   anchor.setProvider(provider);
 
   const providerEphemeralRollup = new anchor.AnchorProvider(
-    new anchor.web3.Connection(
+    new ConnectionMagicRouter(
       process.env.EPHEMERAL_PROVIDER_ENDPOINT ||
-        "https://devnet-as.magicblock.app/",
+        "https://devnet-router.magicblock.app/",
       {
         wsEndpoint:
-          process.env.EPHEMERAL_WS_ENDPOINT || "wss://devnet-as.magicblock.app/",
+          process.env.EPHEMERAL_WS_ENDPOINT || "wss://devnet-router.magicblock.app/",
         commitment: "confirmed",
       },
     ),
@@ -42,12 +48,32 @@ describe("cabal-escrow", () => {
   console.log(`Current SOL Public Key: ${anchor.Wallet.local().publicKey}`);
 
   const program = anchor.workspace.CabalEscrow as Program<CabalEscrow>;
-  const payer = anchor.Wallet.local().publicKey;
-  const payee = anchor.web3.Keypair.generate().publicKey;
+  // Use a fresh depositor for every run so the deterministic escrow PDA is
+  // never left over from an earlier devnet test.
+  const depositor = anchor.web3.Keypair.generate();
+  const payer = depositor.publicKey;
+  // The provider wallet is an existing system account on both base and ER;
+  // using it as payee avoids writing to a non-existent account on ER.
+  const payee = anchor.Wallet.local().publicKey;
 
   console.log("Program ID: ", program.programId.toString());
 
   it("Initialize escrow on Solana (base layer)", async () => {
+    let funded = false;
+    for (let attempt = 0; attempt < 3 && !funded; attempt += 1) {
+      try {
+        const airdrop = await provider.connection.requestAirdrop(
+          depositor.publicKey,
+          300_000_000,
+        );
+        await provider.connection.confirmTransaction(airdrop, "confirmed");
+        funded = true;
+      } catch (error) {
+        if (attempt === 2) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+      }
+    }
+
     const [escrowPda] = web3.PublicKey.findProgramAddressSync(
       [Buffer.from(ESCROW_SEED), payer.toBuffer()],
       program.programId,
@@ -58,10 +84,10 @@ describe("cabal-escrow", () => {
       .initializeEscrow(payee, new anchor.BN(AMOUNT), new anchor.BN(0))
       .accounts({
         depositor: payer,
-      })
+      } as any)
       .transaction();
 
-    const txHash = await provider.sendAndConfirm(tx, [provider.wallet.payer], {
+    const txHash = await provider.sendAndConfirm(tx, [depositor], {
       skipPreflight: true,
       commitment: "confirmed",
     });
@@ -105,12 +131,23 @@ describe("cabal-escrow", () => {
       .delegate()
       .accounts({
         payer,
+        bufferPda: delegateBufferPdaFromDelegatedAccountAndOwnerProgram(
+          escrowPda,
+          program.programId,
+        ),
+        delegationRecordPda:
+          delegationRecordPdaFromDelegatedAccount(escrowPda),
+        delegationMetadataPda:
+          delegationMetadataPdaFromDelegatedAccount(escrowPda),
         pda: escrowPda,
-      })
+        ownerProgram: program.programId,
+        delegationProgram: DELEGATION_PROGRAM_ID,
+        systemProgram: web3.SystemProgram.programId,
+      } as any)
       .remainingAccounts(remainingAccounts)
       .transaction();
 
-    const txHash = await provider.sendAndConfirm(tx, [provider.wallet.payer], {
+    const txHash = await provider.sendAndConfirm(tx, [depositor], {
       skipPreflight: true,
       commitment: "confirmed",
     });
@@ -131,16 +168,18 @@ describe("cabal-escrow", () => {
     let tx = await program.methods
       .release()
       .accounts({
+        escrow: escrowPda,
         caller: payer,
         payee,
-      })
+      } as any)
       .transaction();
     tx.feePayer = providerEphemeralRollup.wallet.publicKey;
-    tx.recentBlockhash = (
-      await providerEphemeralRollup.connection.getLatestBlockhash()
-    ).blockhash;
-    tx = await providerEphemeralRollup.wallet.signTransaction(tx);
-    const txHash = await providerEphemeralRollup.sendAndConfirm(tx);
+    const txHash = await sendAndConfirmTransaction(
+      providerEphemeralRollup.connection,
+      tx,
+      [depositor, providerEphemeralRollup.wallet.payer],
+      { skipPreflight: true, commitment: "confirmed" },
+    );
     console.log(`(ER) Release txHash: ${txHash}`);
 
     const payeeBalanceAfter = await providerEphemeralRollup.connection.getBalance(

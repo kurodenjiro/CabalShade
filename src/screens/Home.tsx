@@ -15,15 +15,17 @@ const RETAINED = 200;
  * numbers, so implementing the separator rules per screen would guarantee they
  * drift.
  *
- * The reputation tile is a mock. Ticket 03 decided to ship a placeholder value
- * rather than an em dash until a real signal exists; it is derived from the
- * peer identifier in Rust so it stays stable across the five-second poll, and
- * ticket 39 tracks replacing it. Nothing here knows that — the tile renders
- * whatever Rust sends, like every other figure on the screen.
+ * The reputation tile is derived in Rust from real demonstrated behaviour —
+ * relayed transactions, relayed bytes, settled intents and observed peer
+ * latency (see src/reputation.rs). The delta is measured against a persisted
+ * baseline so it stays stable across the five-second poll. Nothing here knows
+ * any of that — the tile renders whatever Rust sends, like every other figure
+ * on the screen.
  */
 export function Home() {
   const [snapshot, setSnapshot] = useState<MeshSnapshotView | null>(null);
   const [lines, setLines] = useState<LogLine[]>([]);
+  const isTauriRuntime = Boolean((window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__);
 
   useEffect(() => {
     let cancelled = false;
@@ -51,7 +53,7 @@ export function Home() {
       const next = [...previous, line];
       return next.length > RETAINED ? next.slice(-RETAINED) : next;
     });
-  });
+  }, isTauriRuntime);
 
   return (
     <div
@@ -64,6 +66,14 @@ export function Home() {
     >
       <Panel label="MESH STATUS">
         <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-5)", padding: "var(--space-6)" }}>
+          <div style={{ display: "flex", justifyContent: "flex-end", minHeight: 96 }}>
+            <img
+              src="/ds-assets/logo/oracle-emblem.png"
+              alt="Cabal Mesh oracle emblem"
+              className="cm-pixel"
+              style={{ width: 108, height: 108, objectFit: "contain", opacity: 0.92 }}
+            />
+          </div>
           <div style={{ display: "flex", alignItems: "center", gap: "var(--space-4)" }}>
             <StatusDot tone={snapshot?.connected ? "online" : "offline"} pulse={snapshot?.connected} />
             {/* The status word exists as text, not only as a colour — a

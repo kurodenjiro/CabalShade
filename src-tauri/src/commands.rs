@@ -230,18 +230,43 @@ pub async fn mesh_snapshot(state: State<'_, AppState>) -> Result<MeshSnapshotVie
     let mesh = services.mesh.as_ref().ok_or(AppError::MeshOffline)?;
     let snapshot = mesh.snapshot().await.map_err(|_| AppError::MeshOffline)?;
 
-    // Deltas are omitted rather than fabricated. There is no baseline to
-    // compare against yet, and the brand's copy rules demand exact figures —
-    // a made-up "+12.4%" would be a fabricated trust signal in a product whose
-    // whole pitch is proving things.
-    // The exception is the reputation score, which ticket 03 resolved as a
-    // mock until a real signal exists. It is derived rather than constant so
-    // it does not jitter between polls — see src/reputation.rs, which is the
-    // only place the value is produced, and ticket 39 to replace it.
-    let reputation = crate::reputation::Reputation::of(&snapshot.peer_id);
+    // Reputation from real demonstrated behaviour — relayed transactions,
+    // relayed bytes, settled intents and observed peer latency. See
+    // src/reputation.rs; the delta is measured against a persisted baseline so
+    // it stays stable between five-second polls.
+    let best_peer_latency_ms = mesh
+        .nearby_nodes()
+        .await
+        .ok()
+        .and_then(|peers| peers.iter().filter_map(|p| p.latency_ms).min());
+    let relayed_tx_count = {
+        let bridge = services.bridge.lock().await;
+        bridge.get_relayed_history().len() as u64
+    };
+    let settled_deals = {
+        let store = services.intents.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        store
+            .all()
+            .into_iter()
+            .filter(|i| matches!(i.status, cabal_core::IntentStatus::Settled { .. }))
+            .count() as u64
+    };
+    let signals = crate::reputation::Signals {
+        relayed_tx_count,
+        relay_bytes: snapshot.relay_bytes,
+        settled_deals,
+        best_peer_latency_ms,
+    };
+    let reputation = crate::reputation::Reputation::of(&snapshot.peer_id, signals);
     let reputation_tile = match reputation {
         Some(reading) => {
-            StatTile::with_delta("REPUTATION SCORE", reading.value(), reading.delta_percent)
+            let baseline = crate::reputation::ReputationBaseline::load_or_establish(
+                &snapshot.peer_id,
+                reading.score,
+                &cabal_store::JsonStore::new(crate::app_paths::in_data_dir("reputation.json")),
+            );
+            let delta = baseline.map(|b| b.delta_percent(reading.score)).unwrap_or(0.0);
+            StatTile::with_delta("REPUTATION SCORE", reading.value(), delta)
         }
         // No mesh, no peer identifier, nothing to derive from.
         None => StatTile::plain("REPUTATION SCORE", "—"),
@@ -438,7 +463,7 @@ fn seeded_position(seed: &str) -> (f32, f32, u16) {
 #[serde(rename_all = "camelCase")]
 pub struct IntentView {
     pub id: String,
-    /// e.g. `BUY AVAX`.
+    /// e.g. `BUY SOL`.
     pub title: String,
     /// e.g. `UNDER $95`.
     pub subtitle: String,
@@ -793,24 +818,30 @@ pub async fn settle_intent(
                     }
                 }
 
-                // Move to Settled with the REAL release signature as proof.
-                let release_tx = lines
-                    .lines()
-                    .last()
-                    .and_then(|line| line.rsplit(' ').next())
-                    .unwrap_or_default()
-                    .to_owned();
+                // Honest status: only a release that actually confirmed on-chain
+                // is a settlement. When any leg was signed offline and queued
+                // for relay, the deal is Waiting — the proof cannot be written
+                // until the create lands and the release runs. The resume task
+                // in lib.rs fires the release once the queued create confirms.
+                let next_status = if queued_for_relay.is_empty() {
+                    // The release tx signature is the real proof.
+                    let release_tx = lines
+                        .lines()
+                        .last()
+                        .and_then(|line| line.rsplit(' ').next())
+                        .unwrap_or_default()
+                        .to_owned();
+                    IntentStatus::Settled {
+                        proof: cabal_core::ProofHash::new(release_tx),
+                        filled_at: cabal_core::UsdPrice::from_cents(0),
+                        elapsed_ms: 0,
+                    }
+                } else {
+                    IntentStatus::Waiting
+                };
                 {
                     let mut store = intents.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                    let _ = store.transition(
-                        &id,
-                        IntentStatus::Settled {
-                            proof: cabal_core::ProofHash::new(release_tx),
-                            filled_at: cabal_core::UsdPrice::from_cents(0),
-                            elapsed_ms: 0,
-                        },
-                        now,
-                    );
+                    let _ = store.transition(&id, next_status, now);
                 }
                 let snapshot = intents
                     .lock()
@@ -1169,8 +1200,8 @@ pub async fn vault_total(state: State<'_, AppState>) -> Result<String, AppError>
 #[serde(rename_all = "camelCase")]
 pub struct ProfileView {
     pub node_id: String,
-    /// `87.6 (+5.3%)`, or an em dash with no mesh. Mocked per ticket 03 — see
-    /// src/reputation.rs for what that means and ticket 39 to replace it.
+    /// `87.6 (+5.3%)`, or an em dash with no mesh. Derived from real
+    /// demonstrated behaviour — see src/reputation.rs.
     pub reputation: String,
     pub member_since: String,
     pub offline: bool,
@@ -1207,11 +1238,53 @@ pub async fn profile_summary(state: State<'_, AppState>) -> Result<ProfileView, 
     // switch for a mesh that is not there.
     let offline = snapshot.as_ref().is_none_or(|s| s.offline);
 
-    // Mocked per ticket 03, derived from the same peer identifier the home
-    // tile uses so the two screens never disagree. See src/reputation.rs.
+    // Real demonstrated behaviour — see src/reputation.rs. The score is
+    // derived from relayed transactions, relayed bytes, settled intents and
+    // observed peer latency, none of which are fabricated.
+    let best_peer_latency_ms = match services.mesh.as_ref() {
+        Some(mesh) => mesh
+            .nearby_nodes()
+            .await
+            .ok()
+            .and_then(|peers| peers.iter().filter_map(|p| p.latency_ms).min()),
+        None => None,
+    };
+    let relayed_tx_count = {
+        let bridge = services.bridge.lock().await;
+        bridge.get_relayed_history().len() as u64
+    };
+    let settled_deals = {
+        let store = services.intents.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        store
+            .all()
+            .into_iter()
+            .filter(|i| matches!(i.status, cabal_core::IntentStatus::Settled { .. }))
+            .count() as u64
+    };
     let reputation = snapshot
         .as_ref()
-        .and_then(|s| crate::reputation::Reputation::of(&s.peer_id))
+        .and_then(|s| {
+            let signals = crate::reputation::Signals {
+                relayed_tx_count,
+                relay_bytes: s.relay_bytes,
+                settled_deals,
+                best_peer_latency_ms,
+            };
+
+            crate::reputation::Reputation::of(&s.peer_id, signals).map(|reading| {
+                let baseline = crate::reputation::ReputationBaseline::load_or_establish(
+                    &s.peer_id,
+                    reading.score,
+                    &cabal_store::JsonStore::new(
+                        crate::app_paths::in_data_dir("reputation.json"),
+                    ),
+                );
+                let delta = baseline
+                    .map(|b| b.delta_percent(reading.score))
+                    .unwrap_or(0.0);
+                crate::reputation::Reputation { score: reading.score, delta_percent: delta }
+            })
+        })
         .map_or_else(|| "—".into(), |reading| reading.combined());
 
     Ok(ProfileView {

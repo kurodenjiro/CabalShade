@@ -33,7 +33,9 @@
 //! publish, so the transient case self-heals. The swarm itself is deliberately
 //! left running — see `MeshHandle::set_offline`.
 
+#[cfg(mobile)]
 use crate::state::AppState;
+#[cfg(mobile)]
 use tauri::{AppHandle, Manager, Runtime};
 
 /// Handles the app being suspended.
@@ -41,6 +43,7 @@ use tauri::{AppHandle, Manager, Runtime};
 /// Streams are cancelled because a backgrounded webview cannot receive them, so
 /// producing into it is pure battery cost. Mesh participation stops, which also
 /// honours the offline promise while the OS has us paused.
+#[cfg(mobile)]
 pub fn on_suspend<R: Runtime>(app: &AppHandle<R>) {
     let Some(state) = app.try_state::<AppState>() else {
         return;
@@ -76,6 +79,7 @@ pub fn on_suspend<R: Runtime>(app: &AppHandle<R>) {
 /// Local Network access from Settings while the app is backgrounded, and an app
 /// that kept believing it was granted would silently find no peers and blame
 /// the network.
+#[cfg(mobile)]
 pub fn on_resume<R: Runtime>(app: &AppHandle<R>) {
     let Some(state) = app.try_state::<AppState>() else {
         return;

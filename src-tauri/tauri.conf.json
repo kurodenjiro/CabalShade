@@ -4,18 +4,21 @@
   "version": "0.1.0",
   "identifier": "com.cabalmesh.app",
   "build": {
-    "beforeDevCommand": "npm run dev",
+    "beforeDevCommand": "npm run dev:mobile",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run build",
-    "frontendDist": "../dist-desktop"
+    "beforeBuildCommand": "npm run build:mobile",
+    "frontendDist": "../dist-mobile"
   },
   "app": {
     "withGlobalTauri": false,
     "windows": [
       {
         "title": "CabalMesh",
-        "width": 800,
-        "height": 600
+        "width": 390,
+        "height": 844,
+        "resizable": false,
+        "maximizable": false,
+        "fullscreen": false
       }
     ],
     "security": {

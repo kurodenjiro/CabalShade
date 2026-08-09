@@ -59,7 +59,18 @@ impl ZKHandler {
         // Execute Noir build command in blocking task to avoid freezing async runtime
         // Note: This requires nargo (Noir compiler) to be installed
         let circuit_path = self.circuit_path.clone();
-        
+
+        // The circuit must be a compiled Noir project. `nargo prove` on a bare
+        // directory (no Nargo.toml, no compiled artifacts) fails in a way that
+        // reads like a missing compiler — fail fast with the real cause instead.
+        if !std::path::Path::new(&circuit_path).join("Nargo.toml").exists() {
+            return Err(
+                "ZK proving is not configured: noir-circuit/ has no Nargo.toml, so there is \
+                 nothing to prove with. ZK is desktop-only and off the MVP path."
+                    .into(),
+            );
+        }
+
         let output_result = tokio::task::spawn_blocking(move || {
             Command::new("nargo")
                 .args(&["prove", &circuit_path])

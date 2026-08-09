@@ -52,9 +52,17 @@ export function Detail({
       // settle_intent streams verification lines over the Channel and returns
       // the subscription id; the stream closes itself on completion.
       await invoke<string>("settle_intent", { id, onLine: channel });
-      setLog((lines) => [...lines, { text: "SETTLED.", tone: "ok" }]);
-      setBusy(false);
-      onSettled();
+      // Only a genuinely settled intent has a proof to show. When the escrow
+      // create was signed offline and queued for relay, the intent lands in
+      // WAITING — stay here and let the resume path finish it.
+      const next = await invoke<IntentDetail>("get_intent", { id }).catch(() => null);
+      if (next?.view.status.status === "SETTLED") {
+        setLog((lines) => [...lines, { text: "SETTLED.", tone: "ok" }]);
+        setBusy(false);
+        onSettled();
+      } else {
+        setBusy(false);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
       setBusy(false);
@@ -115,6 +123,9 @@ export function Detail({
                 {v.badge}
               </Badge>
             ) : null}
+          </div>
+          <div style={{ borderTop: "1px solid var(--line-subtle)", borderBottom: "1px solid var(--line-subtle)", display: "grid", placeItems: "center", minHeight: 196, padding: "var(--space-3) 0", background: "radial-gradient(circle at center, rgba(255,255,255,.06), transparent 64%)" }}>
+            <img src="/ds-assets/intent/intent-trade.png" alt="Intent route illustration" className="cm-pixel" style={{ width: "min(100%, 214px)", aspectRatio: "1", objectFit: "contain", opacity: 0.92 }} />
           </div>
           <Row label="CONDITION" value={detail.condition} />
           <Row label="AMOUNT" value={detail.amount} />
