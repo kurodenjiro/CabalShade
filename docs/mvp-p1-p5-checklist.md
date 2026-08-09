@@ -68,4 +68,11 @@ actions have been tested separately. A complete proof of the production path
 (`UI click → Tauri IPC → MagicBlock ER release → explorer transaction`) is not
 yet available because ER release is still failing on account/fee routing. Do
 not describe the MVP as having a verified end-to-end ER transaction until a
-desktop Tauri run succeeds with a funded devnet wallet and an explorer link.
+ desktop Tauri run succeeds with a funded devnet wallet and an explorer link.
+
+The integration test now funds its fresh depositor from the existing deployer
+wallet, avoiding the public faucet limit. The ER path is modeled as two phases:
+`releaseEr` changes delegated state, then `settle` pays the wallet after
+commit/undelegate on Solana. The current MagicBlock devnet validator still
+returns `InstructionFallbackNotFound` for the newly upgraded instruction,
+which means its program cache must refresh before this path can be verified.

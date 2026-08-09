@@ -102,6 +102,36 @@ pub mod cabal_escrow {
         Ok(())
     }
 
+    /// Marks an escrow released inside the ER. Payout is finalized on the
+    /// base layer by `settle` because a wallet payee is not delegated and
+    /// Magic Router rejects mixed ER/base writable accounts.
+    pub fn release_er(ctx: Context<ReleaseErEscrow>) -> Result<()> {
+        let escrow = &mut ctx.accounts.escrow;
+        require!(escrow.status == 0, EscrowError::NotActive);
+        require!(escrow.depositor == ctx.accounts.caller.key(), EscrowError::OnlyDepositor);
+        escrow.status = 1;
+        msg!("Escrow {} released in ER; awaiting base settlement", escrow.key());
+        Ok(())
+    }
+
+    /// Pays the wallet after the ER release state has been committed back to
+    /// Solana. This keeps the ER transaction single-environment.
+    pub fn settle(ctx: Context<ReleaseEscrow>) -> Result<()> {
+        let escrow = &mut ctx.accounts.escrow;
+        require!(escrow.status == 1, EscrowError::NotReleased);
+        require!(escrow.amount > 0, EscrowError::NothingToSettle);
+        require!(escrow.depositor == ctx.accounts.caller.key(), EscrowError::OnlyDepositor);
+
+        let amount = escrow.amount;
+        escrow.amount = 0;
+        let escrow_info = escrow.to_account_info();
+        let payee_info = ctx.accounts.payee.to_account_info();
+        **escrow_info.try_borrow_mut_lamports()? -= amount;
+        **payee_info.try_borrow_mut_lamports()? += amount;
+        msg!("Escrow {} settled: {} lamports to {}", escrow.key(), amount, ctx.accounts.payee.key());
+        Ok(())
+    }
+
     /// Refunds the escrowed lamports to the depositor. Callable by the
     /// depositor anytime, or by anyone after expiry.
     pub fn refund(ctx: Context<RefundEscrow>) -> Result<()> {
@@ -202,12 +232,22 @@ pub struct ReleaseEscrow<'info> {
     )]
     pub escrow: Account<'info, Escrow>,
     /// The caller — must be the depositor.
-    #[account(mut)]
     pub caller: Signer<'info>,
     /// CHECK: The payee receiving the released funds. Its lamports are credited
     /// by the program; no account data is read or written through the type.
     #[account(mut)]
     pub payee: AccountInfo<'info>,
+}
+
+#[derive(Accounts)]
+pub struct ReleaseErEscrow<'info> {
+    #[account(
+        mut,
+        seeds = [ESCROW_SEED, escrow.depositor.as_ref()],
+        bump
+    )]
+    pub escrow: Account<'info, Escrow>,
+    pub caller: Signer<'info>,
 }
 
 #[derive(Accounts)]
@@ -268,4 +308,8 @@ pub enum EscrowError {
     OnlyDepositor,
     #[msg("Not authorized or not expired")]
     NotAuthorized,
+    #[msg("Escrow has not been released in the ER")]
+    NotReleased,
+    #[msg("Escrow has already been settled")]
+    NothingToSettle,
 }

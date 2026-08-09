@@ -71,12 +71,32 @@ describe("cabal-escrow", () => {
         await provider.connection.confirmTransaction(airdrop, "confirmed");
         funded = true;
       } catch (error) {
-        if (attempt === 2) {
-          console.warn("Skipping ER steps: devnet faucet unavailable", error);
-          this.skip();
-          return;
-        }
-        await new Promise((resolve) => setTimeout(resolve, 1500));
+        if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 1500));
+      }
+    }
+
+    // Devnet faucet limits are common. Fund the fresh depositor from the
+    // already-funded deployer wallet instead of making the test depend on a
+    // public faucet. This keeps the PDA unique while using an existing SOL
+    // balance as requested for the integration smoke test.
+    if (!funded) {
+      const transfer = web3.SystemProgram.transfer({
+        fromPubkey: provider.wallet.publicKey,
+        toPubkey: depositor.publicKey,
+        lamports: 300_000_000,
+      });
+      try {
+        const tx = new web3.Transaction().add(transfer);
+        await provider.sendAndConfirm(tx, [], {
+          skipPreflight: false,
+          commitment: "confirmed",
+        });
+        funded = true;
+        console.log("Funded fresh depositor from deployer wallet");
+      } catch (error) {
+        console.warn("Skipping ER steps: faucet and deployer funding unavailable", error);
+        this.skip();
+        return;
       }
     }
 
@@ -164,7 +184,7 @@ describe("cabal-escrow", () => {
     throw new Error(`Escrow ${escrowPda} was not delegated to ER within 30 seconds`);
   });
 
-  it("Release escrow on ER (real-time, zero-fee)", async function () {
+  it("Release escrow on ER and settle on base", async function () {
     if (!escrowReady || !escrowPda) this.skip();
 
     const delegated = await (providerEphemeralRollup.connection as ConnectionMagicRouter).getDelegationStatus(escrowPda);
@@ -176,16 +196,11 @@ describe("cabal-escrow", () => {
       throw new Error(`Escrow ${escrowPda} is not readable on ER; delegation has not propagated`);
     }
 
-    const payeeBalanceBefore = await providerEphemeralRollup.connection.getBalance(
-      payee,
-    );
-
     let tx = await program.methods
-      .release()
+      .releaseEr()
       .accounts({
         escrow: escrowPda,
         caller: payer,
-        payee,
       } as any)
       .transaction();
     tx.feePayer = providerEphemeralRollup.wallet.publicKey;
@@ -195,12 +210,31 @@ describe("cabal-escrow", () => {
       [depositor, providerEphemeralRollup.wallet.payer],
       { skipPreflight: true, commitment: "confirmed" },
     );
-    console.log(`(ER) Release txHash: ${txHash}`);
+    console.log(`(ER) Release marker txHash: ${txHash}`);
 
-    const payeeBalanceAfter = await providerEphemeralRollup.connection.getBalance(
-      payee,
-    );
-    const diff = payeeBalanceAfter - payeeBalanceBefore;
-    console.log(`(ER) Payee received: ${diff / LAMPORTS_PER_SOL} SOL`);
+    // Commit the ER state back to Solana before touching the non-delegated
+    // wallet payee on the base layer.
+    const undelegateTx = await program.methods
+      .undelegate()
+      .accounts({ payer, escrow: escrowPda } as any)
+      .transaction();
+    const undelegateHash = await provider.sendAndConfirm(undelegateTx, [depositor], {
+      skipPreflight: true,
+      commitment: "confirmed",
+    });
+    console.log(`(Base Layer) Undelegate/commit txHash: ${undelegateHash}`);
+
+    const payeeBalanceBefore = await provider.connection.getBalance(payee);
+    const settleTx = await program.methods
+      .settle()
+      .accounts({ escrow: escrowPda, caller: payer, payee } as any)
+      .transaction();
+    const settleHash = await provider.sendAndConfirm(settleTx, [depositor], {
+      skipPreflight: true,
+      commitment: "confirmed",
+    });
+    const payeeBalanceAfter = await provider.connection.getBalance(payee);
+    console.log(`(Base Layer) Settle txHash: ${settleHash}`);
+    console.log(`(Base Layer) Payee received: ${(payeeBalanceAfter - payeeBalanceBefore) / LAMPORTS_PER_SOL} SOL`);
   });
 });
