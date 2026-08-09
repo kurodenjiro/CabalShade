@@ -15,6 +15,9 @@ import type { IntentId } from "../shell/screen";
  */
 export function New({ onBroadcast }: { onBroadcast: (id: IntentId) => void }) {
   const [options, setOptions] = useState<FormOptions | null>(null);
+  const [loadingOptions, setLoadingOptions] = useState(true);
+  const [optionsError, setOptionsError] = useState<string | null>(null);
+  const [reloadToken, setReloadToken] = useState(0);
   const [action, setAction] = useState("BUY");
   const [asset, setAsset] = useState("SOL");
   const [condition, setCondition] = useState("Price under");
@@ -27,6 +30,8 @@ export function New({ onBroadcast }: { onBroadcast: (id: IntentId) => void }) {
 
   useEffect(() => {
     let cancelled = false;
+    setLoadingOptions(true);
+    setOptionsError(null);
     invoke<FormOptions>("intent_form_options")
       .then((next) => {
         if (!cancelled) {
@@ -36,12 +41,18 @@ export function New({ onBroadcast }: { onBroadcast: (id: IntentId) => void }) {
         }
       })
       .catch(() => {
-        if (!cancelled) setOptions(null);
+        if (!cancelled) {
+          setOptions(null);
+          setOptionsError("FORM OPTIONS UNAVAILABLE");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingOptions(false);
       });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [reloadToken]);
 
   const confirm = async () => {
     if (busy) return;
@@ -67,7 +78,28 @@ export function New({ onBroadcast }: { onBroadcast: (id: IntentId) => void }) {
     }
   };
 
-  if (!options) return null;
+  if (loadingOptions) {
+    return (
+      <Panel label="NEW INTENT">
+        <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-4)", padding: "var(--space-8)", alignItems: "center", textAlign: "center" }}>
+          <span style={{ fontFamily: "var(--type-heading-family)", fontSize: "var(--text-sm)", color: "var(--text-primary)" }}>LOADING FORM OPTIONS…</span>
+          <span style={{ color: "var(--text-muted)", fontSize: "var(--text-base)" }}>Reading the active mesh protocol.</span>
+        </div>
+      </Panel>
+    );
+  }
+
+  if (!options) {
+    return (
+      <Panel label="NEW INTENT">
+        <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-4)", padding: "var(--space-8)", alignItems: "center", textAlign: "center" }}>
+          <span style={{ fontFamily: "var(--type-heading-family)", fontSize: "var(--text-sm)", color: "var(--text-alert)" }}>{optionsError ?? "FORM UNAVAILABLE"}</span>
+          <span style={{ color: "var(--text-muted)", fontSize: "var(--text-base)" }}>The desktop bridge did not return the protocol options.</span>
+          <Button tone="secondary" size="md" className="cm-touch" onClick={() => setReloadToken((value) => value + 1)}>RETRY</Button>
+        </div>
+      </Panel>
+    );
+  }
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-6)", padding: "var(--space-6)" }}>
