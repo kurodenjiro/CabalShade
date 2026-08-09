@@ -230,18 +230,43 @@ pub async fn mesh_snapshot(state: State<'_, AppState>) -> Result<MeshSnapshotVie
     let mesh = services.mesh.as_ref().ok_or(AppError::MeshOffline)?;
     let snapshot = mesh.snapshot().await.map_err(|_| AppError::MeshOffline)?;
 
-    // Deltas are omitted rather than fabricated. There is no baseline to
-    // compare against yet, and the brand's copy rules demand exact figures —
-    // a made-up "+12.4%" would be a fabricated trust signal in a product whose
-    // whole pitch is proving things.
-    // The exception is the reputation score, which ticket 03 resolved as a
-    // mock until a real signal exists. It is derived rather than constant so
-    // it does not jitter between polls — see src/reputation.rs, which is the
-    // only place the value is produced, and ticket 39 to replace it.
-    let reputation = crate::reputation::Reputation::of(&snapshot.peer_id);
+    // Reputation from real demonstrated behaviour — relayed transactions,
+    // relayed bytes, settled intents and observed peer latency. See
+    // src/reputation.rs; the delta is measured against a persisted baseline so
+    // it stays stable between five-second polls.
+    let best_peer_latency_ms = mesh
+        .nearby_nodes()
+        .await
+        .ok()
+        .and_then(|peers| peers.iter().filter_map(|p| p.latency_ms).min());
+    let relayed_tx_count = {
+        let bridge = services.bridge.lock().await;
+        bridge.get_relayed_history().len() as u64
+    };
+    let settled_deals = {
+        let store = services.intents.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        store
+            .all()
+            .into_iter()
+            .filter(|i| matches!(i.status, cabal_core::IntentStatus::Settled { .. }))
+            .count() as u64
+    };
+    let signals = crate::reputation::Signals {
+        relayed_tx_count,
+        relay_bytes: snapshot.relay_bytes,
+        settled_deals,
+        best_peer_latency_ms,
+    };
+    let reputation = crate::reputation::Reputation::of(&snapshot.peer_id, signals);
     let reputation_tile = match reputation {
         Some(reading) => {
-            StatTile::with_delta("REPUTATION SCORE", reading.value(), reading.delta_percent)
+            let baseline = crate::reputation::ReputationBaseline::load_or_establish(
+                &snapshot.peer_id,
+                reading.score,
+                &cabal_store::JsonStore::new(crate::app_paths::in_data_dir("reputation.json")),
+            );
+            let delta = baseline.map(|b| b.delta_percent(reading.score)).unwrap_or(0.0);
+            StatTile::with_delta("REPUTATION SCORE", reading.value(), delta)
         }
         // No mesh, no peer identifier, nothing to derive from.
         None => StatTile::plain("REPUTATION SCORE", "—"),
@@ -438,7 +463,7 @@ fn seeded_position(seed: &str) -> (f32, f32, u16) {
 #[serde(rename_all = "camelCase")]
 pub struct IntentView {
     pub id: String,
-    /// e.g. `BUY AVAX`.
+    /// e.g. `BUY SOL`.
     pub title: String,
     /// e.g. `UNDER $95`.
     pub subtitle: String,
@@ -566,13 +591,120 @@ pub async fn get_intent(
 ///
 /// [`AppError::NotReady`] before bootstrap, [`AppError::InvalidIntent`] if the
 /// draft cannot be broadcast.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BroadcastDraftInput {
+    pub action: cabal_core::Action,
+    pub asset: String,
+    condition: BroadcastConditionInput,
+    /// Human-readable decimal input from the form (for example `"0.1"`).
+    /// The webview must not be required to construct the fixed-point domain
+    /// representation (`TokenAmount { raw, decimals }`).
+    pub amount: String,
+    pub mode: cabal_core::ExecutionMode,
+    pub privacy: cabal_core::PrivacyLevel,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct BroadcastConditionInput {
+    pub kind: String,
+    pub price: Option<String>,
+}
+
+fn asset_decimals(asset: &str) -> u8 {
+    match asset {
+        "SOL" => 9,
+        "USDC" => 6,
+        "WETH" => 9,
+        "BTC" => 9,
+        _ => 18,
+    }
+}
+
+/// Accept the decimal-comma form commonly produced by mobile keyboards while
+/// retaining support for grouped values such as `1,240.00`.
+fn normalize_amount_input(input: &str) -> String {
+    let trimmed = input.trim();
+    if !trimmed.contains('.') && trimmed.matches(',').count() == 1 {
+        if let Some((whole, fraction)) = trimmed.split_once(',') {
+            if !whole.is_empty() && !fraction.is_empty() && fraction.len() != 3 {
+                return format!("{whole}.{fraction}");
+            }
+        }
+    }
+    trimmed.to_string()
+}
+
+fn parse_broadcast_draft(input: BroadcastDraftInput) -> Result<cabal_core::IntentDraft, AppError> {
+    use crate::error::{AppError, InvalidReason};
+    use cabal_core::{Condition, TokenAmount, UsdPrice};
+
+    if input.asset != "SOL" {
+        return Err(AppError::InvalidIntent {
+            field: "asset",
+            reason: InvalidReason::Malformed,
+        });
+    }
+    let decimals = asset_decimals(&input.asset);
+    let normalized_amount = normalize_amount_input(&input.amount);
+    let amount = TokenAmount::parse(&normalized_amount, decimals).map_err(|err| {
+        let reason = match err {
+            cabal_core::AmountError::Empty => InvalidReason::Missing,
+            cabal_core::AmountError::TooManyDecimals { .. } => InvalidReason::TooPrecise,
+            cabal_core::AmountError::Overflow => InvalidReason::OutOfRange,
+            cabal_core::AmountError::InvalidCharacter | cabal_core::AmountError::MultipleDecimalPoints => InvalidReason::Malformed,
+            _ => InvalidReason::Malformed,
+        };
+        AppError::InvalidIntent { field: "amount", reason }
+    })?;
+    if amount.is_zero() {
+        return Err(AppError::InvalidIntent { field: "amount", reason: InvalidReason::OutOfRange });
+    }
+
+    let condition = match input.condition.kind.as_str() {
+        "any" => Condition::Any,
+        "under" | "above" => {
+            let price = input.condition.price.ok_or(AppError::InvalidIntent {
+                field: "price",
+                reason: InvalidReason::Missing,
+            })?;
+            let price = UsdPrice::parse(&price).map_err(|_| AppError::InvalidIntent {
+                field: "price",
+                reason: InvalidReason::Malformed,
+            })?;
+            if input.condition.kind == "under" {
+                Condition::Under { price }
+            } else {
+                Condition::Above { price }
+            }
+        }
+        _ => {
+            return Err(AppError::InvalidIntent {
+                field: "condition",
+                reason: InvalidReason::Malformed,
+            });
+        }
+    };
+
+    Ok(cabal_core::IntentDraft {
+        action: input.action,
+        asset: input.asset.into_boxed_str(),
+        condition,
+        amount,
+        mode: input.mode,
+        privacy: input.privacy,
+    })
+}
+
 #[tauri::command]
 pub async fn broadcast_intent(
     app: tauri::AppHandle,
-    draft: cabal_core::IntentDraft,
+    draft: BroadcastDraftInput,
     state: State<'_, AppState>,
 ) -> Result<cabal_core::IntentId, AppError> {
     use cabal_core::IntentStatus;
+
+    let draft = parse_broadcast_draft(draft)?;
 
     let services = state.services()?;
     let now = now_secs();
@@ -670,6 +802,21 @@ pub async fn settle_intent(
     let id = cabal_core::IntentId::new(id);
     let now = now_secs();
 
+    // The active Solana escrow settles native SOL. Capture the composed
+    // amount before spawning the stream so settlement cannot silently use a
+    // hardcoded demo value or a non-SOL asset.
+    let settlement_amount = {
+        let store = services.intents.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let stored = store.get(&id).ok_or(AppError::Internal)?;
+        if stored.draft.asset.as_ref() != "SOL" {
+            return Err(AppError::InvalidIntent {
+                field: "asset",
+                reason: crate::error::InvalidReason::Malformed,
+            });
+        }
+        stored.draft.amount.to_plain_string()
+    };
+
     // Validate and move to FindingRoute (a required intermediate before
     // Settled) in one checked step.
     {
@@ -734,7 +881,7 @@ pub async fn settle_intent(
         let outcome: Result<(String, Vec<crate::solana_bridge::QueuedTx>), String> = bridge
             .lock()
             .await
-            .settle_on_chain(&payee)
+            .settle_on_chain(&payee, &settlement_amount)
             .await
             .map(|settled| {
                 let lines = format!(
@@ -942,12 +1089,9 @@ pub async fn intent_form_options() -> Result<FormOptions, AppError> {
 
     Ok(FormOptions {
         actions: Action::ALL.iter().map(|a| format!("{a:?}").to_uppercase()).collect(),
-        assets: vec![
-            AssetOption { name: "SOL".into(), tag: "SOL".into(), decimals: 9 },
-            AssetOption { name: "USDC".into(), tag: "USD".into(), decimals: 6 },
-            AssetOption { name: "WETH".into(), tag: "ETH".into(), decimals: 9 },
-            AssetOption { name: "BTC".into(), tag: "BTC".into(), decimals: 9 },
-        ],
+        // The active Anchor program settles native SOL. Other assets remain a
+        // future token-program integration and must not be offered by this UI.
+        assets: vec![AssetOption { name: "SOL".into(), tag: "SOL".into(), decimals: 9 }],
         conditions: vec!["Price under".into(), "Price above".into(), "Any price".into()],
         modes: ExecutionMode::ALL
             .iter()
@@ -997,12 +1141,9 @@ pub async fn preview_intent(
 
     // Parsed, not trusted. Everything arriving from the webview is hostile
     // until it becomes a domain type.
-    let decimals = match asset.as_str() {
-        "USDC" => 6,
-        "BTC.b" => 8,
-        _ => 18,
-    };
-    let parsed_amount = TokenAmount::parse(&amount, decimals)?;
+    let decimals = asset_decimals(&asset);
+    let normalized_amount = normalize_amount_input(&amount);
+    let parsed_amount = TokenAmount::parse(&normalized_amount, decimals)?;
     if parsed_amount.is_zero() {
         return Err(AppError::InvalidIntent {
             field: "amount",
@@ -1175,8 +1316,8 @@ pub async fn vault_total(state: State<'_, AppState>) -> Result<String, AppError>
 #[serde(rename_all = "camelCase")]
 pub struct ProfileView {
     pub node_id: String,
-    /// `87.6 (+5.3%)`, or an em dash with no mesh. Mocked per ticket 03 — see
-    /// src/reputation.rs for what that means and ticket 39 to replace it.
+    /// `87.6 (+5.3%)`, or an em dash with no mesh. Derived from real
+    /// demonstrated behaviour — see src/reputation.rs.
     pub reputation: String,
     pub member_since: String,
     pub offline: bool,
@@ -1213,11 +1354,53 @@ pub async fn profile_summary(state: State<'_, AppState>) -> Result<ProfileView, 
     // switch for a mesh that is not there.
     let offline = snapshot.as_ref().is_none_or(|s| s.offline);
 
-    // Mocked per ticket 03, derived from the same peer identifier the home
-    // tile uses so the two screens never disagree. See src/reputation.rs.
+    // Real demonstrated behaviour — see src/reputation.rs. The score is
+    // derived from relayed transactions, relayed bytes, settled intents and
+    // observed peer latency, none of which are fabricated.
+    let best_peer_latency_ms = match services.mesh.as_ref() {
+        Some(mesh) => mesh
+            .nearby_nodes()
+            .await
+            .ok()
+            .and_then(|peers| peers.iter().filter_map(|p| p.latency_ms).min()),
+        None => None,
+    };
+    let relayed_tx_count = {
+        let bridge = services.bridge.lock().await;
+        bridge.get_relayed_history().len() as u64
+    };
+    let settled_deals = {
+        let store = services.intents.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        store
+            .all()
+            .into_iter()
+            .filter(|i| matches!(i.status, cabal_core::IntentStatus::Settled { .. }))
+            .count() as u64
+    };
     let reputation = snapshot
         .as_ref()
-        .and_then(|s| crate::reputation::Reputation::of(&s.peer_id))
+        .and_then(|s| {
+            let signals = crate::reputation::Signals {
+                relayed_tx_count,
+                relay_bytes: s.relay_bytes,
+                settled_deals,
+                best_peer_latency_ms,
+            };
+
+            crate::reputation::Reputation::of(&s.peer_id, signals).map(|reading| {
+                let baseline = crate::reputation::ReputationBaseline::load_or_establish(
+                    &s.peer_id,
+                    reading.score,
+                    &cabal_store::JsonStore::new(
+                        crate::app_paths::in_data_dir("reputation.json"),
+                    ),
+                );
+                let delta = baseline
+                    .map(|b| b.delta_percent(reading.score))
+                    .unwrap_or(0.0);
+                crate::reputation::Reputation { score: reading.score, delta_percent: delta }
+            })
+        })
         .map_or_else(|| "—".into(), |reading| reading.combined());
 
     Ok(ProfileView {

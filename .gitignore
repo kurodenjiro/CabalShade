@@ -2,6 +2,7 @@ node_modules/
 dist/
 dist-desktop/
 dist-mobile/
+dist-mobile-mvp/
 .env
 .env.local
 

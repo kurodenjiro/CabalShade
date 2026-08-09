@@ -72,7 +72,9 @@ impl Network {
     pub const fn contracts(self) -> Contracts {
         match self {
             Self::Fuji => Contracts {
-                escrow: None,
+                // Solana devnet cabal_escrow deployment. The enum name `Fuji`
+                // is retained for IPC compatibility with the earlier build.
+                escrow: Some("7ajNjyCeMYaPNDecgxDLt5NAJVoey39DKGhcjiVRQSuq"),
                 marketplace: None,
                 voucher: None,
             },
@@ -233,10 +235,11 @@ mod tests {
     }
 
     #[test]
-    fn an_undeployed_contract_is_none_rather_than_a_placeholder() {
-        // A plausible-looking wrong address fails as a chain error. None fails
-        // as "not configured", which is the truth and is actionable.
-        assert!(NetworkConfig::default().escrow().is_none());
+    fn the_default_escrow_is_the_active_devnet_deployment() {
+        assert_eq!(
+            NetworkConfig::default().escrow().as_deref(),
+            Some("7ajNjyCeMYaPNDecgxDLt5NAJVoey39DKGhcjiVRQSuq"),
+        );
     }
 
     #[test]

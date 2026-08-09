@@ -1,8 +1,14 @@
 import * as anchor from "@coral-xyz/anchor";
 import { Program, web3 } from "@coral-xyz/anchor";
 import { CabalEscrow } from "../target/types/cabal_escrow";
-import { LAMPORTS_PER_SOL } from "@solana/web3.js";
-import { GetCommitmentSignature } from "@magicblock-labs/ephemeral-rollups-sdk";
+import { LAMPORTS_PER_SOL, sendAndConfirmTransaction } from "@solana/web3.js";
+import {
+  DELEGATION_PROGRAM_ID,
+  ConnectionMagicRouter,
+  delegateBufferPdaFromDelegatedAccountAndOwnerProgram,
+  delegationMetadataPdaFromDelegatedAccount,
+  delegationRecordPdaFromDelegatedAccount,
+} from "@magicblock-labs/ephemeral-rollups-sdk";
 
 const ESCROW_SEED = "cabal-escrow";
 const AMOUNT = 100_000_000; // 0.1 SOL in lamports
@@ -23,12 +29,12 @@ describe("cabal-escrow", () => {
   anchor.setProvider(provider);
 
   const providerEphemeralRollup = new anchor.AnchorProvider(
-    new anchor.web3.Connection(
+    new ConnectionMagicRouter(
       process.env.EPHEMERAL_PROVIDER_ENDPOINT ||
-        "https://devnet-as.magicblock.app/",
+        "https://devnet-router.magicblock.app/",
       {
         wsEndpoint:
-          process.env.EPHEMERAL_WS_ENDPOINT || "wss://devnet-as.magicblock.app/",
+          process.env.EPHEMERAL_WS_ENDPOINT || "wss://devnet-router.magicblock.app/",
         commitment: "confirmed",
       },
     ),
@@ -42,13 +48,59 @@ describe("cabal-escrow", () => {
   console.log(`Current SOL Public Key: ${anchor.Wallet.local().publicKey}`);
 
   const program = anchor.workspace.CabalEscrow as Program<CabalEscrow>;
-  const payer = anchor.Wallet.local().publicKey;
-  const payee = anchor.web3.Keypair.generate().publicKey;
+  // Use a fresh depositor for every run so the deterministic escrow PDA is
+  // never left over from an earlier devnet test.
+  const depositor = anchor.web3.Keypair.generate();
+  const payer = depositor.publicKey;
+  // The provider wallet is an existing system account on both base and ER;
+  // using it as payee avoids writing to a non-existent account on ER.
+  const payee = anchor.Wallet.local().publicKey;
+  let escrowReady = false;
+  let escrowPda: web3.PublicKey;
 
   console.log("Program ID: ", program.programId.toString());
 
-  it("Initialize escrow on Solana (base layer)", async () => {
-    const [escrowPda] = web3.PublicKey.findProgramAddressSync(
+  it("Initialize escrow on Solana (base layer)", async function () {
+    let funded = false;
+    for (let attempt = 0; attempt < 3 && !funded; attempt += 1) {
+      try {
+        const airdrop = await provider.connection.requestAirdrop(
+          depositor.publicKey,
+          300_000_000,
+        );
+        await provider.connection.confirmTransaction(airdrop, "confirmed");
+        funded = true;
+      } catch (error) {
+        if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 1500));
+      }
+    }
+
+    // Devnet faucet limits are common. Fund the fresh depositor from the
+    // already-funded deployer wallet instead of making the test depend on a
+    // public faucet. This keeps the PDA unique while using an existing SOL
+    // balance as requested for the integration smoke test.
+    if (!funded) {
+      const transfer = web3.SystemProgram.transfer({
+        fromPubkey: provider.wallet.publicKey,
+        toPubkey: depositor.publicKey,
+        lamports: 300_000_000,
+      });
+      try {
+        const tx = new web3.Transaction().add(transfer);
+        await provider.sendAndConfirm(tx, [], {
+          skipPreflight: false,
+          commitment: "confirmed",
+        });
+        funded = true;
+        console.log("Funded fresh depositor from deployer wallet");
+      } catch (error) {
+        console.warn("Skipping ER steps: faucet and deployer funding unavailable", error);
+        this.skip();
+        return;
+      }
+    }
+
+    [escrowPda] = web3.PublicKey.findProgramAddressSync(
       [Buffer.from(ESCROW_SEED), payer.toBuffer()],
       program.programId,
     );
@@ -58,26 +110,24 @@ describe("cabal-escrow", () => {
       .initializeEscrow(payee, new anchor.BN(AMOUNT), new anchor.BN(0))
       .accounts({
         depositor: payer,
-      })
+      } as any)
       .transaction();
 
-    const txHash = await provider.sendAndConfirm(tx, [provider.wallet.payer], {
+    const txHash = await provider.sendAndConfirm(tx, [depositor], {
       skipPreflight: true,
       commitment: "confirmed",
     });
     console.log(`(Base Layer) Initialize txHash: ${txHash}`);
 
     const escrow = await program.account.escrow.fetch(escrowPda);
+    escrowReady = true;
     console.log(
       `Escrow state: depositor=${escrow.depositor.toString()}, payee=${escrow.payee.toString()}, amount=${escrow.amount.toString()}, status=${escrow.status}`,
     );
   });
 
-  it("Delegate escrow PDA to ER", async () => {
-    const [escrowPda] = web3.PublicKey.findProgramAddressSync(
-      [Buffer.from(ESCROW_SEED), payer.toBuffer()],
-      program.programId,
-    );
+  it("Delegate escrow PDA to ER", async function () {
+    if (!escrowReady || !escrowPda) this.skip();
 
     const remainingAccounts =
       providerEphemeralRollup.connection.rpcEndpoint.includes("localhost") ||
@@ -105,48 +155,86 @@ describe("cabal-escrow", () => {
       .delegate()
       .accounts({
         payer,
+        bufferPda: delegateBufferPdaFromDelegatedAccountAndOwnerProgram(
+          escrowPda,
+          program.programId,
+        ),
+        delegationRecordPda:
+          delegationRecordPdaFromDelegatedAccount(escrowPda),
+        delegationMetadataPda:
+          delegationMetadataPdaFromDelegatedAccount(escrowPda),
         pda: escrowPda,
-      })
+        ownerProgram: program.programId,
+        delegationProgram: DELEGATION_PROGRAM_ID,
+        systemProgram: web3.SystemProgram.programId,
+      } as any)
       .remainingAccounts(remainingAccounts)
       .transaction();
 
-    const txHash = await provider.sendAndConfirm(tx, [provider.wallet.payer], {
+    const txHash = await provider.sendAndConfirm(tx, [depositor], {
       skipPreflight: true,
       commitment: "confirmed",
     });
     console.log(`(Base Layer) Delegate txHash: ${txHash}`);
-    await new Promise((resolve) => setTimeout(resolve, 3000));
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      const status = await (providerEphemeralRollup.connection as ConnectionMagicRouter).getDelegationStatus(escrowPda);
+      if (status.isDelegated) return;
+      await new Promise((resolve) => setTimeout(resolve, 2500));
+    }
+    throw new Error(`Escrow ${escrowPda} was not delegated to ER within 30 seconds`);
   });
 
-  it("Release escrow on ER (real-time, zero-fee)", async () => {
-    const [escrowPda] = web3.PublicKey.findProgramAddressSync(
-      [Buffer.from(ESCROW_SEED), payer.toBuffer()],
-      program.programId,
-    );
+  it("Release escrow on ER and settle on base", async function () {
+    if (!escrowReady || !escrowPda) this.skip();
 
-    const payeeBalanceBefore = await providerEphemeralRollup.connection.getBalance(
-      payee,
-    );
+    const delegated = await (providerEphemeralRollup.connection as ConnectionMagicRouter).getDelegationStatus(escrowPda);
+    if (!delegated.isDelegated) {
+      throw new Error(`Escrow ${escrowPda} is not delegated; refusing to send an ER release`);
+    }
+    const erEscrow = await providerEphemeralRollup.connection.getAccountInfo(escrowPda);
+    if (!erEscrow) {
+      throw new Error(`Escrow ${escrowPda} is not readable on ER; delegation has not propagated`);
+    }
 
     let tx = await program.methods
-      .release()
+      .releaseEr()
       .accounts({
+        escrow: escrowPda,
         caller: payer,
-        payee,
-      })
+      } as any)
       .transaction();
     tx.feePayer = providerEphemeralRollup.wallet.publicKey;
-    tx.recentBlockhash = (
-      await providerEphemeralRollup.connection.getLatestBlockhash()
-    ).blockhash;
-    tx = await providerEphemeralRollup.wallet.signTransaction(tx);
-    const txHash = await providerEphemeralRollup.sendAndConfirm(tx);
-    console.log(`(ER) Release txHash: ${txHash}`);
-
-    const payeeBalanceAfter = await providerEphemeralRollup.connection.getBalance(
-      payee,
+    const txHash = await sendAndConfirmTransaction(
+      providerEphemeralRollup.connection,
+      tx,
+      [depositor, providerEphemeralRollup.wallet.payer],
+      { skipPreflight: true, commitment: "confirmed" },
     );
-    const diff = payeeBalanceAfter - payeeBalanceBefore;
-    console.log(`(ER) Payee received: ${diff / LAMPORTS_PER_SOL} SOL`);
+    console.log(`(ER) Release marker txHash: ${txHash}`);
+
+    // Commit the ER state back to Solana before touching the non-delegated
+    // wallet payee on the base layer.
+    const undelegateTx = await program.methods
+      .undelegate()
+      .accounts({ payer, escrow: escrowPda } as any)
+      .transaction();
+    const undelegateHash = await provider.sendAndConfirm(undelegateTx, [depositor], {
+      skipPreflight: true,
+      commitment: "confirmed",
+    });
+    console.log(`(Base Layer) Undelegate/commit txHash: ${undelegateHash}`);
+
+    const payeeBalanceBefore = await provider.connection.getBalance(payee);
+    const settleTx = await program.methods
+      .settle()
+      .accounts({ escrow: escrowPda, caller: payer, payee } as any)
+      .transaction();
+    const settleHash = await provider.sendAndConfirm(settleTx, [depositor], {
+      skipPreflight: true,
+      commitment: "confirmed",
+    });
+    const payeeBalanceAfter = await provider.connection.getBalance(payee);
+    console.log(`(Base Layer) Settle txHash: ${settleHash}`);
+    console.log(`(Base Layer) Payee received: ${(payeeBalanceAfter - payeeBalanceBefore) / LAMPORTS_PER_SOL} SOL`);
   });
 });

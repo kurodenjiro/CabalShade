@@ -10,8 +10,8 @@ import React, { useState } from "react";
 import ReactDOM from "react-dom/client";
 import "../ds/index";
 import { AppShell } from "../shell/AppShell";
+import { useLogStream } from "../state/useLogStream";
 import { Splash } from "../screens/Splash";
-import { Connecting } from "../screens/Connecting";
 import { Home } from "../screens/Home";
 import { Nodes } from "../screens/Nodes";
 import { Intents } from "../screens/Intents";
@@ -23,15 +23,17 @@ import { Settled } from "../screens/Settled";
 import type { Screen } from "../shell/screen";
 
 function App() {
-  // Starts at splash: the app has no session until the user asks for one, and
-  // the prototype's own flow is splash -> connecting -> home.
+  // Starts at splash; entering the mesh goes directly to Home while the
+  // handshake continues in the background.
   const [screen, setScreen] = useState<Screen>({ name: "splash" });
 
+  // Keep the mesh handshake alive in the background. The user lands on Home
+  // immediately; the status card and log reflect readiness as it changes.
+  const isTauriRuntime = Boolean((window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__);
+  useLogStream("enter_mesh", {}, () => undefined, screen.name === "home" && isTauriRuntime);
+
   if (screen.name === "splash") {
-    return <Splash onEnter={() => setScreen({ name: "connecting" })} />;
-  }
-  if (screen.name === "connecting") {
-    return <Connecting onJoined={() => setScreen({ name: "home" })} />;
+    return <Splash onEnter={() => setScreen({ name: "home" })} />;
   }
 
   return (

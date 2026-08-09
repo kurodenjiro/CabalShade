@@ -10,9 +10,8 @@ import type { SessionStatus } from "../types/bindings";
  * full stops. "ZERO IDENTITY. PRIVATE INTENTS." is three statements, not a
  * tagline to be softened.
  *
- * The offers are gated on the **real** session state from `session_status`:
- * ENTER THE MESH is disabled until bootstrap completes, and the node id shows
- * once one exists — no more offering a join the app cannot perform yet.
+ * Session status is observed in the background for diagnostics; ENTER THE MESH
+ * remains available while Home reflects readiness as it arrives.
  */
 export function Splash({ onEnter }: { onEnter: () => void }) {
   const [status, setStatus] = useState<SessionStatus | null>(null);
@@ -25,7 +24,7 @@ export function Splash({ onEnter }: { onEnter: () => void }) {
           if (!cancelled) setStatus(next);
         })
         .catch(() => {
-          /* not ready renders as disabled */
+          /* Browser preview may not expose Tauri IPC; keep the splash actionable. */
         });
     };
     poll();
@@ -36,7 +35,6 @@ export function Splash({ onEnter }: { onEnter: () => void }) {
     };
   }, []);
 
-  const ready = status?.ready ?? false;
 
   return (
     <section
@@ -53,34 +51,8 @@ export function Splash({ onEnter }: { onEnter: () => void }) {
         textAlign: "center",
       }}
     >
-      <Logo variant="minimal" size={72} basePath="/ds-assets/logo" />
+      <Logo variant="hero" size={288} basePath="/ds-assets/logo" />
 
-      <h1
-        style={{
-          margin: 0,
-          fontFamily: "var(--type-wordmark-family)",
-          fontSize: "var(--text-xl)",
-          letterSpacing: "var(--type-wordmark-tracking)",
-          // The wordmark's tracking pushes it off-centre without a matching
-          // indent — the board specifies both together.
-          textIndent: "var(--type-wordmark-tracking)",
-          color: "var(--text-primary)",
-        }}
-      >
-        CABAL MESH
-      </h1>
-
-      <p
-        style={{
-          fontFamily: "var(--type-label-family)",
-          fontSize: "var(--text-2xs)",
-          letterSpacing: "var(--tracking-widest)",
-          color: "var(--text-muted)",
-          textTransform: "uppercase",
-        }}
-      >
-        Zero identity. Private intents.
-      </p>
 
       {status?.nodeId ? (
         <p
@@ -106,8 +78,8 @@ export function Splash({ onEnter }: { onEnter: () => void }) {
           marginTop: "var(--space-8)",
         }}
       >
-        <Button tone="primary" size="lg" block className="cm-touch" disabled={!ready} onClick={onEnter}>
-          {ready ? "ENTER THE MESH" : "CONNECTING..."}
+        <Button tone="primary" size="lg" block className="cm-touch" onClick={onEnter}>
+          ENTER THE MESH
         </Button>
         <Button tone="ghost" size="lg" block className="cm-touch" onClick={onEnter}>
           CREATE ANONYMOUS NODE

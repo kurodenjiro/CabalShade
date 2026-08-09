@@ -28,6 +28,20 @@ In this network, you are a **Nobody**. Every trace—from your physical location
    - MagicBlock Ephemeral Rollups for instant settlement
    - Instant Session keys for sub-second mesh-side agent authority delegation
 
+### Active deployment
+
+The current default deployment is Solana devnet. The app has this program ID
+compiled in as the default escrow contract, so mobile builds do not depend on a `.env` file:
+
+| Program | Network | Address | Explorer |
+|---|---|---|---|
+| `cabal_escrow` | Solana devnet | `7ajNjyCeMYaPNDecgxDLt5NAJVoey39DKGhcjiVRQSuq` | [View on Solana Explorer](https://explorer.solana.com/address/7ajNjyCeMYaPNDecgxDLt5NAJVoey39DKGhcjiVRQSuq?cluster=devnet) |
+
+The Anchor deployment transaction is recorded in
+[`docs/mvp-p1-p5-checklist.md`](docs/mvp-p1-p5-checklist.md).
+The latest program upgrade transaction is
+`BkNHQWxuZV29CqxZ7ptJdaVEvL3SaZXCgpha4DYrJ6baJ77eSvcEqesPBkEPNNijHCuyKj3CTpEFurZRBzW4DNg`.
+
 ## 🚀 Quick Start
 
 ### Prerequisites
@@ -140,6 +154,13 @@ Nodes prove honesty via zero-knowledge without revealing interaction history.
 
 ### 4. On-Chain Escrow
 Deals lock native SOL in a `cabal_escrow` Anchor program (deposit → release, or depositor/expiry-based refund) instead of being purely simulated. MagicBlock Ephemeral Rollups settle instantly.
+
+### Solana asset settlement
+
+The active mobile path uses the Solana devnet `cabal_escrow` program above and
+settles native SOL. The former Avalanche ERC-721 voucher and marketplace
+artifacts have been removed; no NFT/voucher contract is enabled in the new
+Solana path until a dedicated Solana program and IDL are deployed.
 
 ## 🧪 Testing
 

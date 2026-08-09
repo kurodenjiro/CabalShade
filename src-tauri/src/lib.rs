@@ -40,7 +40,8 @@ pub mod multicast;
 /// See src/tls.rs.
 pub mod tls;
 
-/// The mocked reputation score, in one place. See src/reputation.rs.
+/// Reputation derived from real demonstrated behaviour, in one place.
+/// See src/reputation.rs.
 pub mod reputation;
 
 /// Managed application state. See src/state.rs.
@@ -177,7 +178,7 @@ pub fn run() {
 
                 let rpc_url = std::env::var("SOLANA_RPC_URL")
                     .or_else(|_| std::env::var("AVAX_RPC_URL"))
-                    .unwrap_or_else(|_| blockchain_bridge::DEFAULT_AVAX_RPC_URL.to_string());
+                    .unwrap_or_else(|_| blockchain_bridge::DEFAULT_SOLANA_RPC_URL.to_string());
 
                 let bridge = Arc::new(Mutex::new(BlockchainBridge::new(Some(rpc_url))));
 
