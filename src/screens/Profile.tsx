@@ -96,10 +96,11 @@ export function Profile({ onLeave }: { onLeave: () => void }) {
 
       <Panel>
         {ROWS.map((row) => (
-          <button
+          <div
             key={row.label}
-            type="button"
-            className="cm-touch cm-row"
+            role="listitem"
+            aria-label={`${row.label}: not recorded`}
+            className="cm-row"
             style={{
               width: "100%",
               display: "flex",
@@ -109,7 +110,6 @@ export function Profile({ onLeave }: { onLeave: () => void }) {
               borderTop: "var(--border-hairline-style)",
               background: "none",
               border: "none",
-              cursor: "pointer",
               textAlign: "left",
             }}
           >
@@ -125,10 +125,10 @@ export function Profile({ onLeave }: { onLeave: () => void }) {
             >
               {row.label}
             </span>
-            <span aria-hidden="true" style={{ color: "var(--text-muted)" }}>
-              ›
+            <span style={{ color: "var(--text-muted)", fontSize: "var(--text-2xs)", letterSpacing: "var(--tracking-widest)" }}>
+              NOT RECORDED
             </span>
-          </button>
+          </div>
         ))}
 
         <div
