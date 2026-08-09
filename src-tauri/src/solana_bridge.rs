@@ -540,6 +540,10 @@ impl BlockchainBridge {
         let client = self.rpc_client();
         let signature: Signature = client.send_transaction(&tx).await?;
         tracing::info!("✅ [Bridge] Relayed transaction confirmed. Tx: {}", signature);
+        // A relay reward is earned only after the RPC accepts the signed
+        // transaction and returns its real signature. No reward is recorded
+        // for queued, failed, or merely previewed transactions.
+        crate::activity::append("RELAY_SUCCESS", format!("relay confirmed {}", signature));
         Ok(signature.to_string())
     }
 

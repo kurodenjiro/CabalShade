@@ -1227,6 +1227,7 @@ pub struct ActivityLogView {
     pub broadcast_count: u64,
     pub settled_count: u64,
     pub cancelled_count: u64,
+    pub relayed_count: u64,
 }
 
 #[tauri::command]
@@ -1235,7 +1236,8 @@ pub async fn activity_log() -> Result<ActivityLogView, AppError> {
     let broadcast_count = entries.iter().filter(|entry| entry.kind == "BROADCAST").count() as u64;
     let settled_count = entries.iter().filter(|entry| entry.kind == "SETTLED").count() as u64;
     let cancelled_count = entries.iter().filter(|entry| entry.kind == "CANCEL").count() as u64;
-    Ok(ActivityLogView { entries, broadcast_count, settled_count, cancelled_count })
+    let relayed_count = entries.iter().filter(|entry| entry.kind == "RELAY_SUCCESS").count() as u64;
+    Ok(ActivityLogView { entries, broadcast_count, settled_count, cancelled_count, relayed_count })
 }
 
 /// A deterministic achievement derived from persisted settlement evidence.
@@ -1258,6 +1260,7 @@ pub async fn achievements() -> Result<Vec<AchievementView>, AppError> {
     let entries = crate::activity::all();
     let settled = entries.iter().filter(|entry| entry.kind == "SETTLED").count() as u64;
     let broadcasts = entries.iter().filter(|entry| entry.kind == "BROADCAST").count() as u64;
+    let relayed = entries.iter().filter(|entry| entry.kind == "RELAY_SUCCESS").count() as u64;
     let achievement = |id: &str, title: &str, description: &str, progress: u64, target: u64| {
         AchievementView {
             id: id.to_string(),
@@ -1273,6 +1276,7 @@ pub async fn achievements() -> Result<Vec<AchievementView>, AppError> {
         achievement("first-settlement", "FIRST SETTLEMENT", "Complete one verified escrow settlement.", settled.min(1), 1),
         achievement("trusted-settler", "TRUSTED SETTLER", "Complete three verified escrow settlements.", settled.min(3), 3),
         achievement("mesh-broadcaster", "MESH BROADCASTER", "Broadcast ten intents to the mesh.", broadcasts.min(10), 10),
+        achievement("relay-operator", "RELAY OPERATOR", "Successfully relay one signed transaction for a peer.", relayed.min(1), 1),
     ])
 }
 
