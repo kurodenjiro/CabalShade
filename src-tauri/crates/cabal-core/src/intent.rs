@@ -97,12 +97,36 @@ impl Condition {
     }
 
     /// Whether `candidate` satisfies the condition.
+    ///
+    /// Strict on both sides, which is what makes two *opposing orders* at the
+    /// same number refuse to match: neither "under 95" nor "above 95" accepts
+    /// 95, so there is no price both sides agreed to. See [`Self::ceiling`] for
+    /// the question a buyer asks about a price it is being quoted, which is a
+    /// different question with a different answer.
     #[must_use]
     pub fn is_satisfied_by(&self, candidate: UsdPrice) -> bool {
         match self {
             Self::Under { price } => candidate < *price,
             Self::Above { price } => candidate > *price,
             Self::Any => true,
+        }
+    }
+
+    /// The most a buyer holding this condition will pay, inclusive.
+    ///
+    /// Deliberately *not* [`Self::is_satisfied_by`]. That method answers "did
+    /// two orders agree on a number", where the boundary belongs to neither
+    /// side. This one answers "will I pay what I am being asked", and a limit
+    /// price fills at the limit — every exchange treats "buy up to 95" as
+    /// including 95, and a user who types the asking price means to buy at it.
+    ///
+    /// `None` means no upper limit was stated: `Any` accepts any price by
+    /// definition, and `Above` bounds the wrong end.
+    #[must_use]
+    pub const fn ceiling(&self) -> Option<UsdPrice> {
+        match self {
+            Self::Under { price } => Some(*price),
+            Self::Above { .. } | Self::Any => None,
         }
     }
 }
@@ -398,6 +422,29 @@ mod tests {
     #[test]
     fn any_condition_carries_no_price() {
         assert_eq!(Condition::Any.price(), None);
+    }
+
+    #[test]
+    fn a_limit_buys_at_its_own_limit() {
+        // The exact case that broke the Boost flow: the compose form defaults
+        // to a 0.0001 SOL ceiling and the marketplace lists at exactly that,
+        // so a strict reading refused the app's own default trade.
+        let limit = UsdPrice::from_cents(100_000);
+        let condition = Condition::Under { price: limit };
+
+        assert_eq!(condition.ceiling(), Some(limit));
+        // Matching still treats the boundary as agreed by neither side.
+        assert!(!condition.is_satisfied_by(limit));
+    }
+
+    #[test]
+    fn an_unbounded_condition_states_no_ceiling() {
+        assert_eq!(Condition::Any.ceiling(), None);
+        // A floor is not a ceiling: `Above` bounds the other end entirely.
+        assert_eq!(
+            Condition::Above { price: UsdPrice::from_cents(9400) }.ceiling(),
+            None
+        );
     }
 
     #[test]

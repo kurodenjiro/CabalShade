@@ -240,7 +240,7 @@ export function Detail({
       {live && !v.origin && !v.counterparty && !isSolEscrow ? (
         <Panel label="NFT SETTLEMENT">
           <div style={{ padding: "var(--space-4)", color: "var(--text-muted)", fontSize: "var(--text-xs)" }}>
-            BOOST NFT LISTINGS SETTLE IN THE MARKETPLACE WHEN A BUYER PURCHASES THEM. THIS SOL ESCROW BUTTON DOES NOT APPLY.
+            THIS BOOST NFT MATCH WILL BE SETTLED BY A BUYER-SIGNED PURCHASE RELAY. SOL ESCROW DOES NOT APPLY TO THIS ITEM.
           </div>
         </Panel>
       ) : null}

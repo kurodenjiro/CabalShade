@@ -18,7 +18,13 @@
 # Usage
 #
 #   scripts/demo-two-peers.sh            # launch both peers
-#   scripts/demo-two-peers.sh --reset    # discard both peers' state first
+#   scripts/demo-two-peers.sh --reset    # fresh orders, same wallets
+#   scripts/demo-two-peers.sh --wipe     # new wallets too (unfunds the demo)
+#
+# `--reset` deliberately keeps each peer's vault. Devnet SOL is funded per
+# address, so regenerating the wallets between runs would strand the funding in
+# an identity nothing uses any more — which is exactly what you do not want
+# after finally getting an airdrop through.
 #
 # The seeded orders match: BUY 0.1 SOL under 96.00 against SELL 0.1 SOL above
 # 94.00, which clears at the midpoint, 95.00 USDC/SOL.
@@ -37,10 +43,17 @@ VITE_PORT=1420
 TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/src-tauri/target}"
 BINARY="$TARGET_DIR/debug/cabalmesh"
 
-if [[ "${1:-}" == "--reset" ]]; then
-  echo "==> Discarding previous demo state in $DEMO_DIR"
-  rm -rf "$PEER_A" "$PEER_B"
-fi
+case "${1:-}" in
+  --reset)
+    echo "==> Clearing both ledgers (wallets kept)"
+    rm -f "$PEER_A/intents.json" "$PEER_B/intents.json"
+    rm -f "$PEER_A/pending_relay_txs.json" "$PEER_B/pending_relay_txs.json"
+    ;;
+  --wipe)
+    echo "==> Wiping $DEMO_DIR, including both wallets"
+    rm -rf "$PEER_A" "$PEER_B"
+    ;;
+esac
 
 mkdir -p "$PEER_A" "$PEER_B"
 
@@ -119,14 +132,27 @@ address_of() {
 }
 
 SELLER="$(address_of "$PEER_B")"
+BUYER="$(address_of "$PEER_A")"
 cat <<EOF
 
-  peer-a (BUY)   $(address_of "$PEER_A")
+  peer-a (BUY)   $BUYER
   peer-b (SELL)  $SELLER
 
-  The sell side funds the escrow, so peer-b needs devnet SOL:
+  Who needs devnet SOL depends on which side moves the asset:
 
-      solana airdrop 1 $SELLER --url devnet
+    SOL trade    the seller escrows and releases, so fund peer-b only:
+                     solana airdrop 1 $SELLER --url devnet
+
+    Boost NFT    the buyer pays for the NFT, and the seller pays to mint
+                 and list it, so fund both:
+                     solana airdrop 1 $SELLER --url devnet
+                     solana airdrop 1 $BUYER --url devnet
+
+  The CLI faucet is rate limited; https://faucet.solana.com takes the same
+  addresses when it refuses.
+
+  These wallets survive --reset. Only --wipe regenerates them, which strands
+  whatever you funded.
 
   Then watch both windows: the orders mirror across the mesh, match at
   95.00 USDC / SOL, and peer-b settles the escrow to peer-a's wallet.

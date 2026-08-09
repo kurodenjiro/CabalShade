@@ -69,6 +69,30 @@ pub struct SettlementQuery {
     pub buyer_intent: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BoostPurchaseRequest {
+    pub buyer_intent: String,
+    pub seller_intent: String,
+    pub mint: String,
+    pub seller_wallet: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BoostTradeSettled {
+    pub buyer_intent: String,
+    pub seller_intent: String,
+    pub signature: String,
+    /// What the chain actually charged, in lamports. The seller has no other
+    /// way to learn this: only the buyer reads the listing account before
+    /// paying, and the seller's own record still holds the band midpoint the
+    /// two orders matched at, which is a number nobody was ever going to pay.
+    /// `None` only if the verified price was somehow never recorded — never
+    /// filled in with a guess.
+    pub price_lamports: Option<u64>,
+}
+
 /// Everything a deal worker needs. Cloned per deal rather than borrowed: the
 /// worker outlives the mesh event that started it.
 #[derive(Clone)]
@@ -160,6 +184,7 @@ struct Roles {
     buyer_remote_id: String,
     asset: String,
     amount: String,
+    boost_mint: Option<String>,
 }
 
 impl Roles {
@@ -193,6 +218,7 @@ impl Roles {
             buyer_remote_id: remote_id(buyer),
             asset: seller.draft.asset.to_string(),
             amount: seller.draft.amount.to_plain_string(),
+            boost_mint: seller.boost_mint.as_deref().map(str::to_string),
             seller: seller.id.clone(),
             buyer: buyer.id.clone(),
         })
@@ -255,8 +281,10 @@ pub fn spawn(ctx: DealContext, left: IntentId, right: IntentId) {
 
         ctx.say(&sides, "MESH AGENT: OPPOSITE ORDER MATCHED.");
 
-        // The buyer does not move funds. It parks in WAITING and settles only
-        // when the seller's announced signature checks out on-chain.
+        // The buyer does not move funds on the SOL route. It parks in WAITING
+        // and settles only when the seller's announced signature checks out
+        // on-chain. On the Boost route it does pay, but not from here — the
+        // purchase is driven by the seller's `boost_purchase_request`.
         if !roles.we_are_seller {
             ctx.say(&sides, "SETTLEMENT AGENT: AWAITING COUNTERPARTY ESCROW.");
             ctx.advance(&sides, &IntentStatus::Waiting);
@@ -270,14 +298,31 @@ pub fn spawn(ctx: DealContext, left: IntentId, right: IntentId) {
                 })
             };
             if still_waiting {
-                ctx.say(&sides, "ESCROW ERROR: COUNTERPARTY ESCROW NOT RECEIVED. INTENT CANCELLED.");
-                ctx.advance(&sides, &IntentStatus::Cancelled);
+                // Not cancelled. Thirty seconds of silence is not proof that
+                // nothing happened: the counterparty may be mid-settlement, and
+                // on the Boost route this side may already be holding a signed
+                // purchase waiting on a relay. Cancelling here would put
+                // "called off" in the ledger for a trade that then completes.
+                // `chase_pending_settlements` keeps asking, and a verified
+                // signature closes it.
+                ctx.say(&sides, "SETTLEMENT AGENT: NOTHING YET. ORDER STAYS OPEN AND KEEPS ASKING.");
             }
             return;
         }
 
+        // The paying side's decisions are traced from here on. Everything this
+        // worker says otherwise goes out as a UI event, which is invisible the
+        // moment you are reading a log file to find out why a deal stalled.
+        tracing::info!(
+            seller = %roles.seller,
+            buyer = %roles.buyer,
+            asset = %roles.asset,
+            "deal worker: acting as the paying side"
+        );
+
         let price = negotiate(&ctx, &roles, &sides).await;
         let Some(price) = price else {
+            tracing::info!("deal worker: local agent rejected the terms; orders stay open");
             ctx.say(&sides, "AGENT-0X123..2413: TERMS REJECTED. ORDERS REMAIN OPEN.");
             ctx.advance(&sides, &IntentStatus::Waiting);
             return;
@@ -289,7 +334,23 @@ pub fn spawn(ctx: DealContext, left: IntentId, right: IntentId) {
         // away the buyer's SOL), so keep the agreed order waiting rather than
         // sending it through the SOL escrow route.
         if roles.asset != "SOL" {
-            ctx.say(&sides, "BOOST MARKET: TERMS AGREED. AWAITING BUYER-SIGNED RELAY PURCHASE.");
+            let Some(mint) = roles.boost_mint.clone() else {
+                tracing::warn!(
+                    seller = %roles.seller,
+                    "boost deal has no mint on the sell order; nothing to buy"
+                );
+                ctx.say(&sides, "BOOST MARKET ERROR: SELLER LISTING HAS NO NFT MINT. INTENT CANCELLED.");
+                ctx.advance(&sides, &IntentStatus::Cancelled);
+                return;
+            };
+            tracing::info!(%mint, buyer_intent = %roles.buyer_remote_id, "publishing boost purchase request");
+            ctx.say(&sides, "BOOST MARKET: TERMS AGREED. REQUESTING BUYER-SIGNED RELAY PURCHASE.");
+            ctx.publish("boost_purchase_request", serde_json::to_string(&BoostPurchaseRequest {
+                buyer_intent: roles.buyer_remote_id.clone(),
+                seller_intent: roles.seller_remote_id.clone(),
+                mint,
+                seller_wallet: roles.own_wallet.clone(),
+            }).unwrap_or_default()).await;
             ctx.advance(&sides, &IntentStatus::Waiting);
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
             let still_waiting = {
@@ -301,8 +362,14 @@ pub fn spawn(ctx: DealContext, left: IntentId, right: IntentId) {
                 })
             };
             if still_waiting {
-                ctx.say(&sides, "ESCROW ERROR: BOOST PURCHASE RELAY NOT RECEIVED. INTENT CANCELLED.");
-                ctx.advance(&sides, &IntentStatus::Cancelled);
+                // Deliberately *not* cancelled. By this point the buyer may
+                // hold a signed purchase waiting on a relay; cancelling here
+                // and having that transaction land later would leave this
+                // ledger claiming a trade was called off while the NFT
+                // actually changed hands. The order stays open and
+                // `boost_trade_settled` closes it whenever the purchase
+                // confirms.
+                ctx.say(&sides, "BOOST MARKET: NO PURCHASE YET. ORDER STAYS OPEN.");
             }
             return;
         }
@@ -671,6 +738,94 @@ mod tests {
         assert!(announcement_for(&store, &mine, OWN).is_none());
     }
 
+    /// A Boost pair: the seller's order carries the concrete NFT, the buyer's
+    /// names only a price ceiling in lamports.
+    fn boost_pair(ceiling_lamports: u64) -> (IntentStore, IntentId, IntentId) {
+        let mut store = IntentStore::new();
+        let now = 1_700_000_000;
+        let mut sell = draft(Action::Sell);
+        sell.asset = "BOOST NFT".into();
+        sell.amount = TokenAmount::parse("1", 0).unwrap();
+        sell.condition = Condition::Any;
+        let mut buy = draft(Action::Buy);
+        buy.asset = "BOOST NFT".into();
+        buy.amount = TokenAmount::parse("1", 0).unwrap();
+        buy.condition = Condition::Under { price: UsdPrice::from_cents(ceiling_lamports) };
+
+        let mine = store.create(sell, now);
+        store.set_boost_mint(&mine, Some("BoostMint111111111111111111111111111111111".into()));
+        let theirs = store.create_remote(
+            buy,
+            RemoteOrigin { intent_id: "int-000000ff".into(), wallet: PEER.into() },
+            now,
+        );
+        for id in [&mine, &theirs] {
+            store
+                .transition(id, IntentStatus::Broadcast { route_len: 1 }, now)
+                .unwrap();
+        }
+        let (found, terms) = store.find_counterparty(&mine).expect("boost sides match");
+        store.pair(&mine, &found, terms, now).unwrap();
+        (store, mine, theirs)
+    }
+
+    #[test]
+    fn a_boost_seller_carries_the_mint_the_buyer_needs() {
+        // The buyer's order names no NFT — it cannot, it is shopping. The mint
+        // has to travel with the seller's side or the purchase has nothing to
+        // spend against.
+        let (store, mine, theirs) = boost_pair(200_000);
+        let roles = Roles::resolve(&store, &mine, &theirs, OWN).unwrap();
+        assert!(roles.we_are_seller);
+        assert_eq!(roles.asset, "BOOST NFT");
+        assert_eq!(
+            roles.boost_mint.as_deref(),
+            Some("BoostMint111111111111111111111111111111111")
+        );
+    }
+
+    /// The guard `on_boost_purchase_request` applies before spending.
+    fn buys(condition: cabal_core::Condition, listing_lamports: u64) -> bool {
+        condition
+            .ceiling()
+            .is_none_or(|limit| listing_lamports <= limit.cents())
+    }
+
+    #[test]
+    fn a_listing_above_the_buyers_limit_is_refused() {
+        // `buy_boost` pays whatever the listing account says and takes no
+        // ceiling of its own, so this check is the only thing between the
+        // buyer's stated limit and its wallet.
+        let (store, _, theirs) = boost_pair(50_000);
+        let condition = store.get(&theirs).unwrap().draft.condition;
+        assert!(!buys(condition, 100_000), "50000-lamport limit must refuse a 100000 listing");
+        assert!(buys(condition, 49_999));
+    }
+
+    #[test]
+    fn a_listing_at_exactly_the_limit_is_bought() {
+        // The regression: the compose form defaults to a 0.0001 SOL ceiling
+        // and the marketplace lists at exactly 100000 lamports, so the app's
+        // own defaults refused each other and no Boost buy could complete.
+        let (store, _, theirs) = boost_pair(100_000);
+        let condition = store.get(&theirs).unwrap().draft.condition;
+        assert!(buys(condition, 100_000));
+    }
+
+    #[test]
+    fn a_buyer_that_named_no_limit_accepts_the_asking_price() {
+        assert!(buys(cabal_core::Condition::Any, 100_000));
+    }
+
+    #[test]
+    fn a_boost_pair_still_matches_when_the_seller_names_no_price() {
+        // The marketplace lists at a fixed price and broadcasts `Any`, so the
+        // band comes entirely from the buyer. Matching must survive that.
+        let (store, mine, _) = boost_pair(200_000);
+        let record = store.get(&mine).unwrap().matched.as_ref().unwrap();
+        assert_eq!(record.price, Some(UsdPrice::from_cents(199_999)));
+    }
+
     #[test]
     fn the_query_wire_shape_is_camel_case() {
         let json = serde_json::to_string(&SettlementQuery {
@@ -779,6 +934,251 @@ pub fn on_settlement_query(ctx: DealContext, query: SettlementQuery) {
         }
         let Ok(payload) = serde_json::to_string(&announcement) else { return };
         ctx.publish("trade_settled", payload).await;
+    });
+}
+
+/// Buyer-side handler for a matched Boost listing. Only the local buyer can
+/// sign this instruction because it spends that wallet's SOL.
+pub fn on_boost_purchase_request(ctx: DealContext, request: BoostPurchaseRequest) {
+    tauri::async_runtime::spawn(async move {
+        let buyer = IntentId::new(request.buyer_intent.clone());
+        let seller_mirror = {
+            let store = ctx.lock();
+            let Some(intent) = store.get(&buyer) else { return };
+            if !intent.is_local() || intent.draft.action != Action::Buy || intent.draft.asset.as_ref() != "BOOST NFT" {
+                return;
+            }
+            let Some(record) = intent.matched.as_ref() else { return };
+            let Some(seller) = store.get(&record.counterparty) else { return };
+            if seller.origin.as_ref().is_none_or(|origin| origin.intent_id != request.seller_intent) {
+                return;
+            }
+            seller.id.clone()
+        };
+
+        // What the listing will actually charge, read from the chain rather
+        // than taken from the seller's word or from the negotiated number.
+        // `buy_boost` pays the listing price with no ceiling of its own, so
+        // this is the only thing standing between the buyer's stated limit and
+        // its wallet.
+        let condition = {
+            let store = ctx.lock();
+            let Some(intent) = store.get(&buyer) else { return };
+            intent.draft.condition
+        };
+        let listed = ctx
+            .bridge
+            .lock()
+            .await
+            .boost_listing_price(&request.seller_wallet, &request.mint)
+            .await;
+        // Compared against the buyer's *limit*, not against the price two
+        // orders negotiated. A limit fills at the limit: a ceiling of 0.0001
+        // buys a listing asking exactly 0.0001, which is the trade the user
+        // asked for and, as it happens, the app's own default on both sides.
+        let ceiling = condition.ceiling();
+        match listed {
+            Some(lamports) if ceiling.is_none_or(|limit| lamports <= limit.cents()) => {
+                ctx.say(
+                    &[&buyer, &seller_mirror],
+                    &format!("BOOST MARKET: LISTING VERIFIED AT {lamports} LAMPORTS."),
+                );
+                // The listing price is what the chain will charge, so it is the
+                // price of this deal. The band midpoint the orders matched on
+                // was never going to be paid by anyone, and leaving it in the
+                // ledger would misreport what the trade cost.
+                {
+                    let mut store = ctx.lock();
+                    store.set_match_price(&buyer, Some(UsdPrice::from_cents(lamports)));
+                    store.set_match_price(&seller_mirror, Some(UsdPrice::from_cents(lamports)));
+                }
+                ctx.persist();
+            }
+            Some(lamports) => {
+                tracing::warn!(
+                    mint = %request.mint,
+                    lamports,
+                    ceiling = ceiling.map(UsdPrice::cents),
+                    "boost listing price is above the buyer's limit"
+                );
+                ctx.say(
+                    &[&buyer, &seller_mirror],
+                    &format!("BOOST MARKET: LISTING WANTS {lamports} LAMPORTS, ABOVE YOUR LIMIT. NOT BUYING."),
+                );
+                ctx.advance(&[&buyer, &seller_mirror], &IntentStatus::Cancelled);
+                return;
+            }
+            None => {
+                ctx.say(
+                    &[&buyer, &seller_mirror],
+                    "BOOST MARKET: NO LISTING FOUND ON-CHAIN FOR THAT NFT. NOT BUYING.",
+                );
+                ctx.advance(&[&buyer, &seller_mirror], &IntentStatus::Cancelled);
+                return;
+            }
+        }
+
+        // Submit it directly whenever this wallet can reach the chain. Queueing
+        // unconditionally made the purchase depend on some *other* peer
+        // volunteering to relay it — so an online buyer alone with its
+        // counterparty never completed, and the seller's timer cancelled a deal
+        // both sides had agreed. Relay is the fallback for an offline buyer,
+        // not the only route.
+        if ctx.bridge.lock().await.check_rpc_reachable().await {
+            let bought = ctx
+                .bridge
+                .lock()
+                .await
+                .buy_boost_nft(&request.mint, &request.seller_wallet)
+                .await;
+            match bought {
+                Ok(signature) => {
+                    {
+                        let mut store = ctx.lock();
+                        store.set_boost_mint(&buyer, Some(request.mint.clone()));
+                    }
+                    ctx.say(&[&buyer, &seller_mirror], &format!("BOOST MARKET: PURCHASED ON DEVNET. TX {signature}"));
+                    settle_boost_purchase(&ctx, &buyer, &seller_mirror, signature).await;
+                }
+                Err(error) => {
+                    // The chain answered and said no — a missing listing, an
+                    // unfunded buyer. Queueing that same instruction for a peer
+                    // would only reproduce the rejection somewhere else.
+                    tracing::warn!(mint = %request.mint, %error, "boost purchase rejected on-chain");
+                    ctx.say(&[&buyer, &seller_mirror], &format!("BOOST MARKET ERROR: PURCHASE REJECTED ({error})."));
+                    ctx.advance(&[&buyer, &seller_mirror], &IntentStatus::Cancelled);
+                }
+            }
+            return;
+        }
+
+        let queued = ctx
+            .bridge
+            .lock()
+            .await
+            .queue_buy_boost_nft(&request.mint, &request.seller_wallet)
+            .await;
+        let queued = match queued {
+            Ok(queued) => queued,
+            Err(error) => {
+                ctx.say(&[&buyer, &seller_mirror], &format!("BOOST MARKET ERROR: BUYER COULD NOT SIGN PURCHASE ({error})."));
+                ctx.advance(&[&buyer, &seller_mirror], &IntentStatus::Cancelled);
+                return;
+            }
+        };
+        {
+            let mut store = ctx.lock();
+            store.set_relay_queue_id(&buyer, queued.id.clone());
+            store.set_boost_mint(&buyer, Some(request.mint.clone()));
+        }
+        ctx.persist();
+        ctx.notify(&[&buyer]);
+        ctx.say(&[&buyer, &seller_mirror], "BOOST MARKET: BUYER SIGNED PURCHASE. QUEUED FOR MESH RELAY.");
+        ctx.publish("relay_tx", serde_json::json!({
+            "type": "RelayTx", "queue_id": queued.id, "raw_tx_hex": queued.raw_tx_hex,
+            "summary": queued.summary,
+        }).to_string()).await;
+    });
+}
+
+/// Writes a completed Boost purchase into the ledger and tells the seller.
+///
+/// One place, because the purchase can complete three ways — submitted
+/// directly by an online buyer, relayed by a peer, or drained from this
+/// device's own queue once its RPC returned — and all three are the same fact:
+/// the buyer's signature is on-chain and the NFT has moved.
+async fn settle_boost_purchase(
+    ctx: &DealContext,
+    buyer: &IntentId,
+    seller_mirror: &IntentId,
+    signature: String,
+) {
+    let (price, seller_intent) = {
+        let store = ctx.lock();
+        let price = store
+            .get(buyer)
+            .and_then(|intent| intent.matched.as_ref().and_then(|m| m.price));
+        let seller_intent = store
+            .get(seller_mirror)
+            .and_then(|intent| intent.origin.as_ref().map(|origin| origin.intent_id.clone()));
+        (price, seller_intent)
+    };
+    ctx.advance(
+        &[buyer, seller_mirror],
+        &IntentStatus::Settled {
+            proof: cabal_core::ProofHash::new(signature.clone()),
+            filled_at: price.unwrap_or_else(|| UsdPrice::from_cents(0)),
+            elapsed_ms: 0,
+        },
+    );
+    // The seller cannot see the buyer's transaction land, so it is told —
+    // and it verifies the signature for itself before believing this. `price`
+    // here is the real listing price the guard in `on_boost_purchase_request`
+    // already verified on-chain and wrote into the buyer's own record — not
+    // the band midpoint the two orders matched at, which the seller's ledger
+    // still holds and nobody was ever going to pay.
+    if let Some(seller_intent) = seller_intent {
+        ctx.publish(
+            "boost_trade_settled",
+            serde_json::to_string(&BoostTradeSettled {
+                buyer_intent: buyer.to_string(),
+                seller_intent,
+                signature,
+                price_lamports: price.map(UsdPrice::cents),
+            })
+            .unwrap_or_default(),
+        )
+        .await;
+    }
+}
+
+pub fn on_boost_relay_confirmed(ctx: DealContext, queue_id: String, signature: String) {
+    tauri::async_runtime::spawn(async move {
+        let (buyer, seller_mirror) = {
+            let store = ctx.lock();
+            let Some(buyer) = store.by_relay_queue_id(&queue_id) else { return };
+            // Already settled by whichever route got there first. Two relayers
+            // and this device's own drain can all report the same purchase.
+            if buyer.status.is_terminal() {
+                return;
+            }
+            let Some(record) = buyer.matched.as_ref() else { return };
+            let Some(seller) = store.get(&record.counterparty) else { return };
+            (buyer.id.clone(), seller.id.clone())
+        };
+        ctx.say(&[&buyer, &seller_mirror], "BOOST MARKET: RELAY CONFIRMED. NFT PURCHASE SETTLED.");
+        settle_boost_purchase(&ctx, &buyer, &seller_mirror, signature).await;
+    });
+}
+
+pub fn on_boost_trade_settled(ctx: DealContext, announcement: BoostTradeSettled) {
+    tauri::async_runtime::spawn(async move {
+        let seller = IntentId::new(announcement.seller_intent);
+        let buyer_mirror = {
+            let store = ctx.lock();
+            let Some(intent) = store.get(&seller) else { return };
+            if !intent.is_local() || intent.draft.action != Action::Sell || intent.draft.asset.as_ref() != "BOOST NFT" { return; }
+            let Some(record) = intent.matched.as_ref() else { return };
+            let Some(buyer) = store.get(&record.counterparty) else { return };
+            if buyer.origin.as_ref().is_none_or(|origin| origin.intent_id != announcement.buyer_intent) { return; }
+            buyer.id.clone()
+        };
+        // The announced price is what the buyer actually verified on-chain
+        // before paying. The seller's own record still holds the band
+        // midpoint from negotiation — recorded here so both ledgers agree on
+        // what the trade cost, not just that it happened.
+        let price = announcement.price_lamports.map(UsdPrice::from_cents);
+        {
+            let mut store = ctx.lock();
+            store.set_match_price(&seller, price);
+            store.set_match_price(&buyer_mirror, price);
+        }
+        ctx.advance(&[&seller, &buyer_mirror], &IntentStatus::Settled {
+            proof: cabal_core::ProofHash::new(announcement.signature),
+            filled_at: price.unwrap_or_else(|| UsdPrice::from_cents(0)),
+            elapsed_ms: 0,
+        });
+        ctx.say(&[&seller, &buyer_mirror], "BOOST MARKET: BUYER RELAY CONFIRMED. NFT PURCHASE SETTLED.");
     });
 }
 

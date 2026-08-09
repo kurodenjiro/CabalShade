@@ -511,12 +511,16 @@ impl BlockchainBridge {
         Ok(client.send_and_confirm_transaction(&transaction).await?.to_string())
     }
 
-    async fn send_boost_instruction(&self, instruction: Instruction, _summary: &str) -> Result<String, String> {
+    async fn send_boost_instruction(&self, instruction: Instruction, summary: &str) -> Result<String, String> {
+        self.send_boost_instructions(vec![instruction], summary).await
+    }
+
+    async fn send_boost_instructions(&self, instructions: Vec<Instruction>, _summary: &str) -> Result<String, String> {
         let keypair = self.primary_keypair().map_err(|e| e.to_string())?;
         let online = timeout(Duration::from_secs(8), async {
             let client = self.rpc_client();
             let blockhash = client.get_latest_blockhash().await.map_err(|e| e.to_string())?;
-            let message = Message::new(std::slice::from_ref(&instruction), Some(&keypair.pubkey()));
+            let message = Message::new(&instructions, Some(&keypair.pubkey()));
             let mut tx = Transaction::new_unsigned(message);
             tx.sign(&[&keypair], blockhash);
             let sig = client.send_and_confirm_transaction(&tx).await.map_err(|e| e.to_string())?;
@@ -525,6 +529,34 @@ impl BlockchainBridge {
         match online {
             Ok(result) => result,
             Err(_) => Err("Solana RPC timed out; boost transaction was not submitted".to_string()),
+        }
+    }
+
+    /// Creates `owner`'s associated token account for `mint`, or does nothing
+    /// if it already exists.
+    ///
+    /// Prepended to every Boost purchase because the deployed program requires
+    /// the buyer's token account to exist already: the source has since gained
+    /// `init_if_needed` on it, but devnet is running the older build, which
+    /// rejects a first-time buyer with `AccountNotInitialized`. Idempotent, so
+    /// it stays correct once that upgrade does ship — and it costs the buyer
+    /// only the rent it would owe for the account either way.
+    fn create_ata_idempotent_instruction(payer: &Pubkey, owner: &Pubkey, mint: &Pubkey) -> Instruction {
+        let token_program = Pubkey::from_str(SPL_TOKEN_PROGRAM_ID).expect("valid token program id");
+        let associated_program =
+            Pubkey::from_str(ASSOCIATED_TOKEN_PROGRAM_ID).expect("valid associated token program id");
+        Instruction {
+            program_id: associated_program,
+            accounts: vec![
+                solana_sdk::instruction::AccountMeta::new(*payer, true),
+                solana_sdk::instruction::AccountMeta::new(Self::associated_token_address(owner, mint), false),
+                solana_sdk::instruction::AccountMeta::new_readonly(*owner, false),
+                solana_sdk::instruction::AccountMeta::new_readonly(*mint, false),
+                solana_sdk::instruction::AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
+                solana_sdk::instruction::AccountMeta::new_readonly(token_program, false),
+            ],
+            // 1 = CreateIdempotent. 0 would fail once the account exists.
+            data: vec![1],
         }
     }
 
@@ -597,11 +629,25 @@ impl BlockchainBridge {
                 solana_sdk::instruction::AccountMeta::new(seller, false),
                 solana_sdk::instruction::AccountMeta::new(keypair.pubkey(), true),
                 solana_sdk::instruction::AccountMeta::new_readonly(token_program, false),
+                // No associated-token program here. The deployed `buy_boost`
+                // takes eight accounts and ends at `system_program`; passing
+                // nine shifts it into that slot and the program rejects the
+                // whole transaction with `InvalidProgramId`. The buyer's token
+                // account is created by the instruction prepended above
+                // instead. Verified against the on-chain IDL, which is the
+                // only description of what is actually running.
                 solana_sdk::instruction::AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
             ],
             data: anchor_discriminator("buy_boost").to_vec(),
         };
-        self.send_boost_instruction(instruction, "Buy boost NFT via mesh").await
+        self.send_boost_instructions(
+            vec![
+                Self::create_ata_idempotent_instruction(&keypair.pubkey(), &keypair.pubkey(), &mint),
+                instruction,
+            ],
+            "Buy boost NFT via mesh",
+        )
+        .await
     }
 
     /// Signs a Boost marketplace purchase locally and places it in the relay
@@ -625,6 +671,13 @@ impl BlockchainBridge {
                 solana_sdk::instruction::AccountMeta::new(seller, false),
                 solana_sdk::instruction::AccountMeta::new(keypair.pubkey(), true),
                 solana_sdk::instruction::AccountMeta::new_readonly(token_program, false),
+                // No associated-token program here. The deployed `buy_boost`
+                // takes eight accounts and ends at `system_program`; passing
+                // nine shifts it into that slot and the program rejects the
+                // whole transaction with `InvalidProgramId`. The buyer's token
+                // account is created by the instruction prepended above
+                // instead. Verified against the on-chain IDL, which is the
+                // only description of what is actually running.
                 solana_sdk::instruction::AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
             ],
             data: anchor_discriminator("buy_boost").to_vec(),
@@ -633,9 +686,41 @@ impl BlockchainBridge {
         // Prefer a fresh blockhash when the buyer can reach devnet, but retain
         // the last verified one for an actually offline signing flow.
         let _ = self.refresh_chain_cache().await;
-        self.sign_offline(instruction, "Buy boost NFT via mesh relay")
-            .await
-            .map_err(|e| e.to_string())
+        self.sign_offline_all(
+            vec![
+                Self::create_ata_idempotent_instruction(&keypair.pubkey(), &keypair.pubkey(), &mint),
+                instruction,
+            ],
+            "Buy boost NFT via mesh relay",
+        )
+        .await
+        .map_err(|e| e.to_string())
+    }
+
+    /// The lamport price a seller's Boost listing will actually charge.
+    ///
+    /// `buy_boost` takes no price argument — it pays whatever the listing
+    /// account says. The negotiated price in an intent is therefore a claim
+    /// about the trade, not a constraint on it, and a buyer that spends
+    /// without reading this is trusting the seller with the number. `None`
+    /// means no listing (or no chain), which is never treated as agreement.
+    pub async fn boost_listing_price(&self, seller: &str, mint: &str) -> Option<u64> {
+        let seller = Pubkey::from_str(seller).ok()?;
+        let mint = Pubkey::from_str(mint).ok()?;
+        let listing = self.listing_pda(&seller, &mint);
+        let account = timeout(
+            Duration::from_secs(10),
+            self.rpc_client().get_account(&listing),
+        )
+        .await
+        .ok()?
+        .ok()?;
+        // 8 discriminator + seller (32) + mint (32) + price (8) + expiry (8).
+        let data = account.data;
+        if data.len() < 80 {
+            return None;
+        }
+        Some(u64::from_le_bytes(data[72..80].try_into().ok()?))
     }
 
     pub async fn list_boost_nfts(&self) -> Result<Vec<BoostNftRecord>, String> {
@@ -827,6 +912,14 @@ impl BlockchainBridge {
     /// Signs an instruction fully offline using the cached blockhash and
     /// queues the raw serialized transaction for a mesh peer to relay.
     async fn sign_offline(&self, instruction: Instruction, summary: &str) -> Result<QueuedTx, Box<dyn Error>> {
+        self.sign_offline_all(vec![instruction], summary).await
+    }
+
+    /// As [`Self::sign_offline`], for an action that needs more than one
+    /// instruction in the same transaction — a Boost purchase carries its
+    /// token-account setup alongside the buy so a relayer submits one
+    /// atomic unit rather than two that can half-land.
+    async fn sign_offline_all(&self, instructions: Vec<Instruction>, summary: &str) -> Result<QueuedTx, Box<dyn Error>> {
         let cache = self.load_chain_cache().ok_or("No cached chain state available — never been online yet")?;
         let keypair = self.primary_keypair()?;
         let blockhash = bs58::decode(&cache.blockhash)
@@ -838,7 +931,7 @@ impl BlockchainBridge {
             })
             .ok_or("cached blockhash is invalid")?;
 
-        let message = Message::new(&[instruction], Some(&keypair.pubkey()));
+        let message = Message::new(&instructions, Some(&keypair.pubkey()));
         let mut tx = Transaction::new_unsigned(message);
         tx.sign(&[&keypair], blockhash);
 
@@ -869,6 +962,30 @@ impl BlockchainBridge {
     }
 
     pub const MAX_ATTEMPTS: u8 = 5;
+
+    /// The queued transactions this device has now submitted itself, with the
+    /// signatures they landed under.
+    ///
+    /// [`Self::drain_pending`] returns only a count, which is enough for a log
+    /// line and not enough for a caller that has to finish something once its
+    /// transaction is on-chain — a queued Boost purchase, for one, settles a
+    /// deal that nothing else will close if no peer relayed it.
+    pub async fn drain_pending_confirmed(&self) -> Vec<QueuedTx> {
+        let before: std::collections::HashSet<String> = self
+            .load_pending_relay_txs()
+            .into_iter()
+            .filter(|tx| tx.status == "confirmed")
+            .map(|tx| tx.id)
+            .collect();
+        if let Err(error) = self.drain_pending().await {
+            tracing::debug!(%error, "queue drain failed");
+            return Vec::new();
+        }
+        self.load_pending_relay_txs()
+            .into_iter()
+            .filter(|tx| tx.status == "confirmed" && !before.contains(&tx.id))
+            .collect()
+    }
 
     pub async fn drain_pending(&self) -> Result<usize, Box<dyn Error>> {
         let mut pending = self.load_pending_relay_txs();

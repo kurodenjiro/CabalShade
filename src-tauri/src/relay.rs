@@ -171,8 +171,6 @@ pub fn on_relay_report(ctx: RelayContext, queue_id: String, status: String, tx_h
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     /// The wire shape both halves agree on. `mesh.rs` reads these exact keys
     /// off the topic, so a rename here silently strands every queued
     /// transaction rather than failing loudly.

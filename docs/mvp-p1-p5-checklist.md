@@ -27,7 +27,13 @@ remain usable without a network connection; the chain is Solana devnet only.
 - [x] Intent proof is the returned chain transaction signature.
 - [x] Solana devnet escrow program deployed and verified on-chain (`7ajNjyCeMYaPNDecgxDLt5NAJVoey39DKGhcjiVRQSuq`, deploy tx `2zCuSsBjtcZJ4er16FmuW3ZdLqjur8EL2oQZmc5Bq6Wog1ePG3gxmz75MzGGcf9VoYMgMk2aX2pXZ9HkGvhT8kVq`).
 - [x] Solana devnet escrow program upgraded after UI integration (upgrade tx `BkNHQWxuZV29CqxZ7ptJdaVEvL3SaZXCgpha4DYrJ6baJ77eSvcEqesPBkEPNNijHCuyKj3CTpEFurZRBzW4DNg`).
-- [ ] Device smoke test with a funded devnet wallet and explorer link.
+- [x] Device smoke test with a funded devnet wallet and explorer link. Two
+      funded peers settled a real 0.1 SOL trade on 2026-08-09: create
+      `4kT8VWYHfe7foC5gfEbpN8HCFsZhn7DZqiQsup77T26aiJSjZ5Uj7pmjXUq9FjeFpXgWQhL3CoWMhUBqkbRK5ER2`,
+      release
+      `pSXLPDPeQtBtPYU8c36LyMRQ5BfgzWCyGYGDntx9G4ydzvhQ3i2hXEG6fzahUzUQD95Ewtso3JcQsb7Qn3HhHoX`
+      (finalized, no error). Balances moved 1.0 → 1.1 SOL on the buyer and
+      1.0 → 0.89999 SOL on the seller.
 
 ## P3 — deterministic matching
 
@@ -50,11 +56,11 @@ manual test procedure.
 `scripts/demo-two-peers.sh` runs both sides on one Mac — separate data
 directories via `CABALMESH_DATA_DIR`, so each peer mints its own wallet — with
 one seeded order each (BUY under 96.00 against SELL above 94.00, clearing at
-95.00). Verified 2026-08-09: both peers mirrored each other's order over mDNS,
-matched at 9500 cents, the buy side parked in `WAITING`, and the sell side
-attempted the real devnet escrow. It failed with `Attempt to debit an account
-but found no record of a prior credit` because the sell wallet was empty —
-the settlement leg still needs `solana airdrop 1 <sell-wallet> --url devnet`.
+95.00). Verified 2026-08-09 with both wallets funded: the peers mirrored each other's
+order over mDNS, matched at 9500 cents, and the sell side settled a real 0.1
+SOL escrow to the buy side, which verified the signature on-chain before
+recording it. Fund the wallets first — the script prints which one each
+scenario needs.
 
 ## P4 — wallet and privacy
 
@@ -74,7 +80,10 @@ the settlement leg still needs `solana airdrop 1 <sell-wallet> --url devnet`.
 - [x] Subscription lifecycle tests.
 - [x] Desktop Tauri window renders the mobile layout at 390×844.
 - [x] Desktop keyboard/focus pass for create, cancel, settle, and offline states (dialog focus traps, Escape cancel, and dismiss buttons verified).
-- [ ] Desktop devnet smoke test with a funded wallet.
+- [x] Desktop devnet smoke test with a funded wallet — two desktop instances,
+      funded devnet wallets, one real settled trade (signatures in P2 above).
+      Verified through the ledgers and the chain; the settled-state UI itself
+      was not observed in that run.
 
 ## Release command set
 

@@ -100,8 +100,11 @@ function App() {
         />
       ) : screen.name === "vault" ? (
         <>
-          {screen.tab === "ASSETS" && <BoostMarketplace />}
+          {/* The ASSETS tab bar and balance rows are Vault's own section —
+              the boost mesh market is a secondary panel bolted onto that tab,
+              so it renders after Vault rather than pushing it down. */}
           <Vault tab={screen.tab} onTabChange={(tab) => setScreen({ name: "vault", tab })} />
+          {screen.tab === "ASSETS" && <BoostMarketplace />}
         </>
       ) : screen.name === "profile" ? (
         <Profile />
