@@ -4,6 +4,10 @@
 
 A decentralized, privacy-first infrastructure enabling autonomous AI Agents to negotiate and execute transactions over a physical Mesh Network, settling on Solana (devnet by default, via MagicBlock Ephemeral Rollups).
 
+## 🎥 Demo
+
+[![CabalMesh demo](https://img.youtube.com/vi/2FVZWOu6xJc/maxresdefault.jpg)](https://youtu.be/2FVZWOu6xJc)
+
 ## 🎯 Philosophy
 
 In this network, you are a **Nobody**. Every trace—from your physical location (IP) and negotiation tactics to your on-chain financial footprint—is erased, leaving only a cryptographically verified result.
