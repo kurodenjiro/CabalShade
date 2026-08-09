@@ -124,6 +124,9 @@ export function Detail({
               </Badge>
             ) : null}
           </div>
+          <div style={{ borderTop: "1px solid var(--line-subtle)", borderBottom: "1px solid var(--line-subtle)", display: "grid", placeItems: "center", minHeight: 196, padding: "var(--space-3) 0", background: "radial-gradient(circle at center, rgba(255,255,255,.06), transparent 64%)" }}>
+            <img src="/ds-assets/intent/intent-trade.png" alt="Intent route illustration" className="cm-pixel" style={{ width: "min(100%, 214px)", aspectRatio: "1", objectFit: "contain", opacity: 0.92 }} />
+          </div>
           <Row label="CONDITION" value={detail.condition} />
           <Row label="AMOUNT" value={detail.amount} />
           <Row label="MODE" value={detail.mode} />

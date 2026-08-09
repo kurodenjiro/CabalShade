@@ -40,7 +40,8 @@ pub mod multicast;
 /// See src/tls.rs.
 pub mod tls;
 
-/// The mocked reputation score, in one place. See src/reputation.rs.
+/// Reputation derived from real demonstrated behaviour, in one place.
+/// See src/reputation.rs.
 pub mod reputation;
 
 /// Managed application state. See src/state.rs.
@@ -177,7 +178,7 @@ pub fn run() {
 
                 let rpc_url = std::env::var("SOLANA_RPC_URL")
                     .or_else(|_| std::env::var("AVAX_RPC_URL"))
-                    .unwrap_or_else(|_| blockchain_bridge::DEFAULT_AVAX_RPC_URL.to_string());
+                    .unwrap_or_else(|_| blockchain_bridge::DEFAULT_SOLANA_RPC_URL.to_string());
 
                 let bridge = Arc::new(Mutex::new(BlockchainBridge::new(Some(rpc_url))));
 
@@ -343,6 +344,11 @@ pub fn run() {
                     commands::copy_mnemonic,
                     commands::import_mnemonic,
                     commands::suggest_mnemonic_word,
+                    commands::get_boost_nfts,
+                    commands::claim_demo_boost,
+                    commands::use_boost_nft,
+                    commands::list_boost_nft,
+                    commands::buy_boost_nft,
                     app_initializer::kill_switch,
             legacy::send_intent_to_mesh,
             legacy::analyze_pdf_content,
@@ -399,7 +405,7 @@ pub fn run() {
             {
                 // Mobile gets the reshaped surface only. Screen commands join
                 // it as their screens land.
-                tauri::generate_handler![commands::unsubscribe, commands::session_status, commands::enter_mesh, commands::mesh_snapshot, commands::subscribe_mesh_log, commands::list_nearby_nodes, commands::list_intents, commands::intent_form_options, commands::preview_intent, commands::vault_assets, commands::vault_identities, commands::vault_keys, commands::profile_summary, commands::set_offline_mode, commands::broadcast_intent, commands::get_intent, commands::cancel_intent, commands::settle_intent, commands::vault_total, commands::export_mnemonic, commands::copy_mnemonic, commands::import_mnemonic, commands::suggest_mnemonic_word]
+                tauri::generate_handler![commands::unsubscribe, commands::session_status, commands::enter_mesh, commands::mesh_snapshot, commands::subscribe_mesh_log, commands::list_nearby_nodes, commands::list_intents, commands::intent_form_options, commands::preview_intent, commands::vault_assets, commands::vault_identities, commands::vault_keys, commands::profile_summary, commands::set_offline_mode, commands::broadcast_intent, commands::get_intent, commands::cancel_intent, commands::settle_intent, commands::vault_total, commands::export_mnemonic, commands::copy_mnemonic, commands::import_mnemonic, commands::suggest_mnemonic_word, commands::get_boost_nfts, commands::claim_demo_boost, commands::use_boost_nft, commands::list_boost_nft, commands::buy_boost_nft]
             }
         })
         .build(tauri::generate_context!())

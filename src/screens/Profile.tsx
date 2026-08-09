@@ -14,11 +14,11 @@ const ROWS: ReadonlyArray<{ label: string; icon: GlyphName }> = [
 /**
  * Identity, settings and leaving the mesh.
  *
- * **The reputation row is a mock.** Ticket 03 decided to ship a placeholder
- * value; it is derived from the peer identifier in Rust, in the same place the
- * home tile reads from, so the two screens cannot disagree. Ticket 39 tracks
- * pointing it at a real signal. With no mesh it stays an em dash — there is no
- * identifier to derive from, and a constant would put one score on every
+ * The reputation row is derived in Rust from real demonstrated behaviour —
+ * relayed transactions, relayed bytes, settled intents and observed peer
+ * latency (see src/reputation.rs) — in the same place the home tile reads
+ * from, so the two screens cannot disagree. With no mesh it stays an em dash —
+ * there is nothing measured yet, and a constant would put one score on every
  * device.
  *
  * The network is shown plainly, with testnet marked, so nobody mistakes a test
@@ -70,6 +70,14 @@ export function Profile({ onLeave }: { onLeave: () => void }) {
     <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-6)", padding: "var(--space-6)" }}>
       <Panel label="IDENTITY">
         <div style={{ padding: "var(--space-6)", display: "flex", flexDirection: "column", gap: "var(--space-5)" }}>
+          <div style={{ display: "flex", justifyContent: "center", paddingBottom: "var(--space-3)" }}>
+            <img
+              src="/ds-assets/logo/oracle-emblem.png"
+              alt="Cabal Mesh oracle emblem"
+              className="cm-pixel"
+              style={{ width: 124, height: 124, objectFit: "contain", opacity: 0.92 }}
+            />
+          </div>
           <Field label="NODE ID" value={profile?.nodeId ?? "—"} />
           <Field label="REPUTATION SCORE" value={profile?.reputation ?? "—"} />
           <Field label="MEMBER SINCE" value={profile?.memberSince ?? "—"} />

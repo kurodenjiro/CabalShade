@@ -81,7 +81,7 @@ export type IntentStatus = { "status": "DRAFT" } | { "status": "BROADCAST", rout
  */
 export type IntentView = { id: string, 
 /**
- * e.g. `BUY AVAX`.
+ * e.g. `BUY SOL`.
  */
 title: string, 
 /**
@@ -176,8 +176,8 @@ pulseMs: number, };
  */
 export type ProfileView = { nodeId: string, 
 /**
- * `87.6 (+5.3%)`, or an em dash with no mesh. Mocked per ticket 03 — see
- * src/reputation.rs for what that means and ticket 39 to replace it.
+ * `87.6 (+5.3%)`, or an em dash with no mesh. Derived from real
+ * demonstrated behaviour — see src/reputation.rs.
  */
 reputation: string, memberSince: string, offline: boolean, network: string, 
 /**

@@ -52,6 +52,8 @@ export const OfflineQueue: React.FC<OfflineQueueProps> = ({ items, onDismiss }) 
 
                         {item.status !== "queued" && (
                             <button
+                                type="button"
+                                aria-label={`Dismiss ${item.summary} notification`}
                                 onClick={() => onDismiss(item.id)}
                                 className="text-slate-400 hover:text-red-500 transition-colors shrink-0"
                             >

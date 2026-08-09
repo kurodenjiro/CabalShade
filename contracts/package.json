@@ -6,8 +6,7 @@
   "scripts": {
     "compile": "hardhat compile",
     "test": "hardhat test",
-    "deploy:fuji": "hardhat run scripts/deploy.ts --network fuji",
-    "deploy:marketplace": "hardhat run scripts/deployMarketplace.ts --network fuji"
+    "deploy:fuji": "hardhat run scripts/deploy.ts --network fuji"
   },
   "devDependencies": {
     "@nomicfoundation/hardhat-toolbox": "^5.0.0",

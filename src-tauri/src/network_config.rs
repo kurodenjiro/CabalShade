@@ -72,12 +72,16 @@ impl Network {
     pub const fn contracts(self) -> Contracts {
         match self {
             Self::Fuji => Contracts {
-                escrow: None,
+                // Solana devnet cabal_escrow deployment. The enum name `Fuji`
+                // is retained for IPC compatibility with the earlier build.
+                escrow: Some("7ajNjyCeMYaPNDecgxDLt5NAJVoey39DKGhcjiVRQSuq"),
+                boost: Some("DVJ6GqkLAGwxceuMLJoKBKrfCposypoMCpBEHFea9GNa"),
                 marketplace: None,
                 voucher: None,
             },
             Self::Mainnet => Contracts {
                 escrow: None,
+                boost: None,
                 marketplace: None,
                 voucher: None,
             },
@@ -90,6 +94,7 @@ impl Network {
 #[serde(rename_all = "camelCase")]
 pub struct Contracts {
     pub escrow: Option<&'static str>,
+    pub boost: Option<&'static str>,
     pub marketplace: Option<&'static str>,
     pub voucher: Option<&'static str>,
 }
@@ -106,6 +111,8 @@ pub struct NetworkConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub escrow_address: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boost_program_address: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub marketplace_address: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub voucher_address: Option<String>,
@@ -117,6 +124,7 @@ impl Default for NetworkConfig {
             network: Network::default(),
             rpc_url: None,
             escrow_address: None,
+            boost_program_address: None,
             marketplace_address: None,
             voucher_address: None,
         }
@@ -156,6 +164,9 @@ impl NetworkConfig {
         if let Some(address) = var("ESCROW_CONTRACT_ADDRESS") {
             self.escrow_address = Some(address);
         }
+        if let Some(address) = var("BOOST_PROGRAM_ADDRESS") {
+            self.boost_program_address = Some(address);
+        }
         if let Some(address) = var("MARKETPLACE_CONTRACT_ADDRESS") {
             self.marketplace_address = Some(address);
         }
@@ -178,6 +189,13 @@ impl NetworkConfig {
         self.escrow_address
             .clone()
             .or_else(|| self.network.contracts().escrow.map(ToOwned::to_owned))
+    }
+
+    #[must_use]
+    pub fn boost(&self) -> Option<String> {
+        self.boost_program_address
+            .clone()
+            .or_else(|| self.network.contracts().boost.map(ToOwned::to_owned))
     }
 
     /// Marketplace address, resolved as [`NetworkConfig::escrow`].
@@ -233,10 +251,11 @@ mod tests {
     }
 
     #[test]
-    fn an_undeployed_contract_is_none_rather_than_a_placeholder() {
-        // A plausible-looking wrong address fails as a chain error. None fails
-        // as "not configured", which is the truth and is actionable.
-        assert!(NetworkConfig::default().escrow().is_none());
+    fn the_default_escrow_is_the_active_devnet_deployment() {
+        assert_eq!(
+            NetworkConfig::default().escrow().as_deref(),
+            Some("7ajNjyCeMYaPNDecgxDLt5NAJVoey39DKGhcjiVRQSuq"),
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Button, Panel } from "../ds";
-import type { AssetOption, FormOptions, ReviewRow } from "../types/bindings";
+import type { AssetOption, FormOptions } from "../types/bindings";
 import type { IntentId } from "../shell/screen";
 
 /**
@@ -9,7 +9,7 @@ import type { IntentId } from "../shell/screen";
  *
  * Every option comes from `intent_form_options` — Rust is the single source of
  * the modes, assets, conditions and privacy levels, so the form cannot drift
- * from what `broadcast_intent` will accept. The review rows come from
+ * from what `broadcast_intent` will accept. Validation happens on submit via
  * `preview_intent`, which validates the draft and returns exactly what the
  * confirm dialog shows.
  */
@@ -22,7 +22,6 @@ export function New({ onBroadcast }: { onBroadcast: (id: IntentId) => void }) {
   const [amount, setAmount] = useState("");
   const [mode, setMode] = useState("SHARK MODE");
   const [privacy, setPrivacy] = useState("MEDIUM");
-  const [rows, setRows] = useState<ReviewRow[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -44,36 +43,11 @@ export function New({ onBroadcast }: { onBroadcast: (id: IntentId) => void }) {
     };
   }, []);
 
-  // Live preview: recompute whenever any field changes. The command validates
-  // and returns the confirm rows, so what the user confirms is exactly what
-  // will be broadcast.
-  const previewArgs = useMemo(
-    () => ({ action, asset, condition, price, amount, mode, privacy }),
-    [action, asset, condition, price, amount, mode, privacy],
-  );
-
-  useEffect(() => {
-    if (!options) return;
-    let cancelled = false;
-    invoke<ReviewRow[]>("preview_intent", previewArgs)
-      .then((next) => {
-        if (!cancelled) setRows(next);
-      })
-      .catch(() => {
-        if (!cancelled) setRows(null);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [previewArgs, options]);
-
   const confirm = async () => {
     if (busy) return;
     setBusy(true);
     setError(null);
     try {
-      // Broadcast accepts the same strings the preview validated, so a draft
-      // that previewed cleanly broadcasts cleanly.
       const id = await invoke<IntentId>("broadcast_intent", {
         draft: {
           action,
@@ -151,9 +125,11 @@ export function New({ onBroadcast }: { onBroadcast: (id: IntentId) => void }) {
 
       {/* MODE */}
       <Field label="MODE">
-        <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-3)" }}>
+        <div style={{ display: "flex", gap: "var(--space-3)", flexWrap: "wrap" }}>
           {options.modes.map((m) => (
-            <ModeRow key={m.label} mode={m.label} description={m.description} selected={mode === m.label} onSelect={() => setMode(m.label)} />
+            <Pill key={m.label} selected={mode === m.label} onClick={() => setMode(m.label)}>
+              {m.label.replace(" MODE", "")}
+            </Pill>
           ))}
         </div>
       </Field>
@@ -169,37 +145,6 @@ export function New({ onBroadcast }: { onBroadcast: (id: IntentId) => void }) {
         </div>
       </Field>
 
-      {rows && (
-        <Panel label="REVIEW">
-          <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-4)", padding: "var(--space-4)" }}>
-            {rows.map((row) => (
-              <div key={row.key} style={{ display: "flex", justifyContent: "space-between", gap: "var(--space-5)" }}>
-                <span
-                  style={{
-                    fontFamily: "var(--type-label-family)",
-                    fontSize: "var(--text-2xs)",
-                    letterSpacing: "var(--tracking-widest)",
-                    color: "var(--text-muted)",
-                  }}
-                >
-                  {row.key}
-                </span>
-                <span
-                  style={{
-                    fontFamily: "var(--type-data-family)",
-                    fontSize: "var(--text-sm)",
-                    color: "var(--text-primary)",
-                    textAlign: "right",
-                  }}
-                >
-                  {row.value}
-                </span>
-              </div>
-            ))}
-          </div>
-        </Panel>
-      )}
-
       {error && (
         <Panel>
           <div style={{ color: "var(--text-alert)", fontSize: "var(--text-base)", padding: "var(--space-4)" }}>
@@ -208,7 +153,7 @@ export function New({ onBroadcast }: { onBroadcast: (id: IntentId) => void }) {
         </Panel>
       )}
 
-      <Button tone="primary" size="lg" block className="cm-touch" disabled={busy || !rows} onClick={confirm}>
+      <Button tone="primary" size="lg" block className="cm-touch" disabled={busy} onClick={confirm}>
         {busy ? "BROADCASTING..." : "BROADCAST INTENT"}
       </Button>
     </div>
@@ -267,39 +212,6 @@ function Pill({ selected, onClick, children }: { selected: boolean; onClick: () 
       }}
     >
       {children}
-    </button>
-  );
-}
-
-function ModeRow({ mode, description, selected, onSelect }: { mode: string; description: string; selected: boolean; onSelect: () => void }) {
-  return (
-    <button
-      type="button"
-      className="cm-touch"
-      onClick={onSelect}
-      style={{
-        background: selected ? "var(--surface-raised)" : "none",
-        border: selected ? "var(--border-width-thick) solid var(--border-loud)" : "var(--border-width-thin) solid var(--border-subtle)",
-        borderRadius: "var(--radius-sm)",
-        padding: "var(--space-4) var(--space-5)",
-        cursor: "pointer",
-        textAlign: "left",
-        display: "flex",
-        flexDirection: "column",
-        gap: "var(--space-2)",
-      }}
-    >
-      <span
-        style={{
-          fontFamily: "var(--type-label-family)",
-          fontSize: "var(--text-2xs)",
-          letterSpacing: "var(--tracking-widest)",
-          color: selected ? "var(--text-primary)" : "var(--text-secondary)",
-        }}
-      >
-        {mode}
-      </span>
-      <span style={{ fontSize: "var(--text-base)", color: "var(--text-muted)" }}>{description}</span>
     </button>
   );
 }

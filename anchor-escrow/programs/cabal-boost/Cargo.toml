@@ -1,12 +1,11 @@
 [package]
-name = "cabal-escrow"
+name = "cabal-boost"
 version = "0.1.0"
-description = "CabalShade escrow on Solana + MagicBlock Ephemeral Rollups"
 edition = "2021"
 
 [lib]
 crate-type = ["cdylib", "lib"]
-name = "cabal_escrow"
+name = "cabal_boost"
 
 [features]
 default = []
@@ -22,8 +21,6 @@ custom-panic = []
 [dependencies]
 anchor-lang = { version = "0.32.1", features = ["init-if-needed"] }
 anchor-spl = { version = "0.32.1", features = ["associated_token", "token"] }
-blake3 = "=1.5.5"
-ephemeral-rollups-sdk = { version = "0.16.2", features = ["anchor-compat"] }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }

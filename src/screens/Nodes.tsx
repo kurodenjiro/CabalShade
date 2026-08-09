@@ -49,8 +49,13 @@ export function Nodes() {
           style={{
             position: "relative",
             height: 240,
-            backgroundImage: "var(--texture-grid)",
-            backgroundSize: "var(--texture-grid-size)",
+            // The generated radar plate gives the live node markers a stable
+            // instrument surface. Keep the existing grid as a second layer
+            // so the map remains legible if the image is unavailable.
+            backgroundImage: 'url("/ds-assets/textures/mesh-radar.png"), var(--texture-grid)',
+            backgroundSize: "cover, var(--texture-grid-size)",
+            backgroundPosition: "center, center",
+            backgroundRepeat: "no-repeat, repeat",
           }}
         >
           {(nodes ?? []).map((node) => (
@@ -152,14 +157,31 @@ function Empty({ title, body }: { title: string; body: string }) {
   return (
     <div
       style={{
+        position: "relative",
         padding: "var(--space-9) var(--space-6)",
         display: "flex",
         flexDirection: "column",
         gap: "var(--space-4)",
         alignItems: "center",
         textAlign: "center",
+        backgroundImage: title === "DISCOVERY UNAVAILABLE" ? 'url("/ds-assets/textures/glitch.png")' : undefined,
+        backgroundSize: "cover",
+        backgroundBlendMode: "screen",
+        isolation: "isolate",
       }}
     >
+      {title === "DISCOVERY UNAVAILABLE" && (
+        <span
+          aria-hidden="true"
+          style={{
+            position: "absolute",
+            inset: 0,
+            background: "var(--surface-panel)",
+            opacity: 0.84,
+            zIndex: -1,
+          }}
+        />
+      )}
       <span
         style={{
           fontFamily: "var(--type-heading-family)",

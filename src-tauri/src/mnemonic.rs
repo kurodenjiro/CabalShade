@@ -224,10 +224,10 @@ mod tests {
 
     #[test]
     fn a_checksum_error_is_rejected() {
-        let mnemonic = Mnemonic::generate();
+        let mnemonic = Mnemonic::parse("abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about").unwrap();
         let mut words: Vec<&str> = mnemonic.words();
-        // Swap two words: every word is valid, but the checksum fails.
-        words.swap(0, 1);
+        // Change a checksum word to a different valid word with a deterministic failure.
+        words[11] = "ability";
         assert_eq!(
             Mnemonic::parse(&words.join(" ")),
             Err(MnemonicError::Checksum)

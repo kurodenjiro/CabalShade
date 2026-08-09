@@ -28,6 +28,40 @@ In this network, you are a **Nobody**. Every trace—from your physical location
    - MagicBlock Ephemeral Rollups for instant settlement
    - Instant Session keys for sub-second mesh-side agent authority delegation
 
+### Active deployment
+
+The current default deployment is Solana devnet. The app has this program ID
+compiled in as the default escrow contract, so mobile builds do not depend on a `.env` file:
+
+| Program | Network | Address | Explorer |
+|---|---|---|---|
+| `cabal_escrow` | Solana devnet | `7ajNjyCeMYaPNDecgxDLt5NAJVoey39DKGhcjiVRQSuq` | [View on Solana Explorer](https://explorer.solana.com/address/7ajNjyCeMYaPNDecgxDLt5NAJVoey39DKGhcjiVRQSuq?cluster=devnet) |
+| `cabal_boost` | Solana devnet | `DVJ6GqkLAGwxceuMLJoKBKrfCposypoMCpBEHFea9GNa` | [View on Solana Explorer](https://explorer.solana.com/address/DVJ6GqkLAGwxceuMLJoKBKrfCposypoMCpBEHFea9GNa?cluster=devnet) |
+
+The Anchor deployment transaction is recorded in
+[`docs/mvp-p1-p5-checklist.md`](docs/mvp-p1-p5-checklist.md).
+The latest program upgrade transaction is
+`BkNHQWxuZV29CqxZ7ptJdaVEvL3SaZXCgpha4DYrJ6baJ77eSvcEqesPBkEPNNijHCuyKj3CTpEFurZRBzW4DNg`.
+The isolated boost program deploy transaction is
+`2mN3R2gZUAbhfyZ6Viu3bkdvHzemuLEzKRUpSnfjGb4ofwzcw8qzAivrfHPxwrk2cghHPLj6Xhu91jqD8zGRCein`.
+For the MVP demo wallet, a devnet boost mint is preloaded:
+`47kzUSjnFYi99zDL9DEFdr1DjGU9DSiRP8VdqTNQ8kTG` (`+2.50%`, 24-hour expiry).
+Its registration transaction is
+`4AAM1eaRCYRbEWg8BGg9fe1tJtDQWF9g84Jrj7vx6REtuZNqfNnXJ5FPhJFB3U9cobpgw3JSdDSb1ouuKDrcxjy1`.
+
+### SPL boost NFTs
+
+Relay rewards are intended to be transferable SPL Token NFTs (decimals `0`,
+one item per mint). Only boost items are tradeable through mesh. Consuming an
+item must burn the NFT, and its recorded expiry ends the relay/AI boost even if
+the wallet remains online. Mesh carries listing and buy intents; Solana remains
+the source of truth for payment, ownership, burn, and expiry.
+
+The mobile Vault includes the `USE / BURN` and `SELL VIA MESH` workflow. The
+dedicated `cabal_boost` program is now deployed independently from escrow; the
+Rust bridge submits `use_boost` and `list_boost` transactions from the primary
+wallet. Inventory indexing and buyer-side `buy_boost` settlement are next.
+
 ## 🚀 Quick Start
 
 ### Prerequisites
@@ -140,6 +174,13 @@ Nodes prove honesty via zero-knowledge without revealing interaction history.
 
 ### 4. On-Chain Escrow
 Deals lock native SOL in a `cabal_escrow` Anchor program (deposit → release, or depositor/expiry-based refund) instead of being purely simulated. MagicBlock Ephemeral Rollups settle instantly.
+
+### Solana asset settlement
+
+The active mobile path uses the Solana devnet `cabal_escrow` program above and
+settles native SOL. The former Avalanche ERC-721 voucher and marketplace
+artifacts have been removed; boost NFTs use the dedicated Solana `cabal_boost`
+program above.
 
 ## 🧪 Testing
 

@@ -6,10 +6,12 @@ resolution = true
 skip-lint = false
 
 [programs.devnet]
-cabal_escrow = "8iRQh7XsJmZ9g2yZxBfWQ8XqV9hV9tCbzvk3sHc4qGp1"
+cabal_escrow = "7ajNjyCeMYaPNDecgxDLt5NAJVoey39DKGhcjiVRQSuq"
+cabal_boost = "DVJ6GqkLAGwxceuMLJoKBKrfCposypoMCpBEHFea9GNa"
 
 [programs.localnet]
-cabal_escrow = "8iRQh7XsJmZ9g2yZxBfWQ8XqV9hV9tCbzvk3sHc4qGp1"
+cabal_escrow = "7ajNjyCeMYaPNDecgxDLt5NAJVoey39DKGhcjiVRQSuq"
+cabal_boost = "DVJ6GqkLAGwxceuMLJoKBKrfCposypoMCpBEHFea9GNa"
 
 [registry]
 url = "https://api.apr.dev"
