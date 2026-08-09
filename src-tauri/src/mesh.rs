@@ -557,6 +557,13 @@ impl MeshNetwork {
                                             tracing::info!("📨 Received relay_confirmed: {} -> {}", queue_id, status);
                                             let _ = tx.send(MeshEvent::RelayConfirmed { queue_id, status, tx_hash });
                                         }
+                                    } else if intent.intent_type == "intent_decision" {
+                                        if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&intent.payload) {
+                                            let intent_id = payload.get("intent_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                            let decision = payload.get("decision").and_then(|v| v.as_str()).unwrap_or("NEEDS_REVIEW").to_string();
+                                            let reason = payload.get("reason").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                            let _ = tx.send(MeshEvent::IntentDecisionReceived { intent_id, decision, reason });
+                                        }
                                     } else if intent.intent_type == "content_request" {
                                         // A buyer is asking whoever sold this tokenId to deliver the content.
                                         if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&intent.payload) {
@@ -696,6 +703,7 @@ pub enum MeshEvent {
     SettlementComplete { details: String },
     RelayTxReceived { queue_id: String, raw_tx_hex: String, summary: String },
     RelayConfirmed { queue_id: String, status: String, tx_hash: Option<String> },
+    IntentDecisionReceived { intent_id: String, decision: String, reason: String },
     ContentRequested { token_id: u64 },
     ContentDelivered { token_id: u64, text: String, signature: String, signer_address: String },
     /// A peer's real Solana wallet address, learned from its "presence" broadcast
