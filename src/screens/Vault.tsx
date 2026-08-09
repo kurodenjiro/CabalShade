@@ -39,15 +39,23 @@ export function Vault({ tab, onTabChange }: { tab: VaultTab; onTabChange: (tab: 
 
   useEffect(() => {
     let cancelled = false;
-    invoke<VaultRow[]>(COMMAND[tab])
+    const refresh = () => invoke<VaultRow[]>(COMMAND[tab])
       .then((next) => {
         if (!cancelled) setRows(next);
       })
       .catch(() => {
         if (!cancelled) setRows([]);
       });
+    refresh();
+    // Claim/use happens in the sibling marketplace panel. Its explicit event
+    // refreshes this true Vault list immediately instead of waiting for the
+    // user to leave and return to ASSETS.
+    window.addEventListener("boost-inventory-updated", refresh);
+    const timer = window.setInterval(refresh, 5_000);
     return () => {
       cancelled = true;
+      window.removeEventListener("boost-inventory-updated", refresh);
+      window.clearInterval(timer);
     };
   }, [tab]);
 
@@ -184,7 +192,11 @@ export function Vault({ tab, onTabChange }: { tab: VaultTab; onTabChange: (tab: 
       )}
 
       <Panel label={tab}>
-        {rows === null ? null : rows.length === 0 ? (
+        {rows === null ? (
+          <div style={{ padding: "var(--space-6)", color: "var(--text-muted)", fontFamily: "var(--type-label-family)", fontSize: "var(--text-2xs)", letterSpacing: "var(--tracking-widest)" }}>
+            SYNCING ASSETS...
+          </div>
+        ) : rows.length === 0 ? (
           <Empty tab={tab} />
         ) : (
           rows.map((row) => <Row key={`${row.tag}-${row.name}`} row={row} />)
@@ -278,6 +290,11 @@ export function Vault({ tab, onTabChange }: { tab: VaultTab; onTabChange: (tab: 
 }
 
 function Row({ row }: { row: VaultRow }) {
+  const amount = row.tag === "SOL"
+    ? `${(Number(row.amount) / 1_000_000_000).toFixed(9)} SOL`
+    : row.tag === "USDC"
+      ? `${(Number(row.amount) / 1_000_000).toFixed(6)} USDC`
+    : row.amount;
   return (
     <div
       className="cm-row"
@@ -336,7 +353,7 @@ function Row({ row }: { row: VaultRow }) {
           color: "var(--text-secondary)",
         }}
       >
-        {row.amount}
+        {amount}
       </span>
     </div>
   );

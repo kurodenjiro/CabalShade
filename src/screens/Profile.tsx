@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Badge, Button, Icon, Panel, Switch } from "../ds";
+import { Badge, Icon, Panel, Switch } from "../ds";
 import type { GlyphName } from "../shell/screen";
-import type { AchievementView, ActivityLogView, ProfileView } from "../types/bindings";
+import type { ProfileView } from "../types/bindings";
 
 const ROWS: ReadonlyArray<{ label: string; icon: GlyphName }> = [
   { label: "ACHIEVEMENTS", icon: "reputation" },
@@ -24,11 +24,10 @@ const ROWS: ReadonlyArray<{ label: string; icon: GlyphName }> = [
  * The network is shown plainly, with testnet marked, so nobody mistakes a test
  * balance for a real one.
  */
-export function Profile({ onLeave }: { onLeave: () => void }) {
+export function Profile() {
   const [profile, setProfile] = useState<ProfileView | null>(null);
-  const [activity, setActivity] = useState<ActivityLogView | null>(null);
-  const [achievementList, setAchievementList] = useState<AchievementView[]>([]);
-  const [expanded, setExpanded] = useState<"achievements" | "activity" | null>(null);
+  const [wallet, setWallet] = useState<string>("");
+  const [copied, setCopied] = useState(false);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -46,6 +45,9 @@ export function Profile({ onLeave }: { onLeave: () => void }) {
         .catch(() => undefined);
 
     refresh();
+    invoke<Array<{ address: string }>>("get_identity")
+      .then((ids) => setWallet(ids?.[0]?.address ?? ""))
+      .catch(() => undefined);
     const timer = window.setInterval(refresh, 5_000);
     return () => {
       cancelled = true;
@@ -53,37 +55,16 @@ export function Profile({ onLeave }: { onLeave: () => void }) {
     };
   }, []);
 
-  useEffect(() => {
-    let cancelled = false;
-    const refreshAchievements = () =>
-      invoke<AchievementView[]>("achievements")
-        .then((next) => {
-          if (!cancelled) setAchievementList(next);
-        })
-        .catch(() => undefined);
-    refreshAchievements();
-    const timer = window.setInterval(refreshAchievements, 5_000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    const refreshActivity = () =>
-      invoke<ActivityLogView>("activity_log")
-        .then((next) => {
-          if (!cancelled) setActivity(next);
-        })
-        .catch(() => undefined);
-    refreshActivity();
-    const timer = window.setInterval(refreshActivity, 5_000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, []);
+  const copyWallet = async () => {
+    if (!wallet) return;
+    try {
+      await navigator.clipboard.writeText(wallet);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch {
+      setCopied(false);
+    }
+  };
 
   const toggleOffline = async () => {
     if (!profile || busy) return;
@@ -114,6 +95,15 @@ export function Profile({ onLeave }: { onLeave: () => void }) {
             />
           </div>
           <Field label="NODE ID" value={profile?.nodeId ?? "—"} />
+          <div className="cm-row" style={{ display: "flex", alignItems: "center", gap: "var(--space-4)" }}>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontFamily: "var(--type-label-family)", fontSize: "var(--text-2xs)", letterSpacing: "var(--tracking-widest)", color: "var(--text-muted)", marginBottom: "var(--space-2)" }}>WALLET</div>
+              <code style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: "var(--text-xs)", color: "var(--text-secondary)" }}>{wallet || "—"}</code>
+            </div>
+            <button type="button" className="cm-touch" onClick={copyWallet} disabled={!wallet} style={{ border: "var(--border-width-thin) solid var(--border-subtle)", background: "none", padding: "var(--space-2) var(--space-3)", color: "var(--text-secondary)", cursor: wallet ? "pointer" : "default" }}>
+              {copied ? "COPIED" : "COPY"}
+            </button>
+          </div>
           <Field label="REPUTATION SCORE" value={profile?.reputation ?? "—"} />
           <Field label="MEMBER SINCE" value={profile?.memberSince ?? "—"} />
           <div style={{ display: "flex", alignItems: "center", gap: "var(--space-4)" }}>
@@ -130,17 +120,11 @@ export function Profile({ onLeave }: { onLeave: () => void }) {
       </Panel>
 
       <Panel>
-        {ROWS.map((row) => {
-          const interactive = row.label === "ACHIEVEMENTS" || row.label === "ACTIVITY LOG";
-          const selected = row.label === "ACHIEVEMENTS" ? expanded === "achievements" : expanded === "activity";
-          return interactive ? (
+        {ROWS.map((row) => (
           <button
             key={row.label}
             type="button"
-            aria-expanded={selected}
-            aria-label={row.label}
-            className="cm-row"
-            onClick={() => setExpanded(selected ? null : row.label === "ACHIEVEMENTS" ? "achievements" : "activity")}
+            className="cm-touch cm-row"
             style={{
               width: "100%",
               display: "flex",
@@ -150,8 +134,8 @@ export function Profile({ onLeave }: { onLeave: () => void }) {
               borderTop: "var(--border-hairline-style)",
               background: "none",
               border: "none",
+              cursor: "pointer",
               textAlign: "left",
-              color: "inherit",
             }}
           >
             <Icon name={row.icon} size={20} basePath="/ds-assets/icons" />
@@ -166,40 +150,11 @@ export function Profile({ onLeave }: { onLeave: () => void }) {
             >
               {row.label}
             </span>
-            <span style={{ color: "var(--text-muted)", fontSize: "var(--text-2xs)", letterSpacing: "var(--tracking-widest)" }}>
-              {row.label === "ACHIEVEMENTS" ? (activity ? `${activity.broadcastCount + activity.settledCount} RECORDED` : "—") : (activity ? `${activity.entries.length} EVENTS` : "—")}
+            <span aria-hidden="true" style={{ color: "var(--text-muted)" }}>
+              ›
             </span>
           </button>
-          ) : (
-          <div
-            key={row.label}
-            role="listitem"
-            aria-label={`${row.label}: not recorded`}
-            className="cm-row"
-            style={{ width: "100%", display: "flex", alignItems: "center", gap: "var(--space-5)", padding: "var(--space-5) var(--space-6)", borderTop: "var(--border-hairline-style)", background: "none", border: "none", textAlign: "left" }}
-          >
-            <Icon name={row.icon} size={20} basePath="/ds-assets/icons" />
-            <span style={{ flex: 1, fontFamily: "var(--type-label-family)", fontSize: "var(--text-2xs)", letterSpacing: "var(--tracking-widest)", color: "var(--text-secondary)" }}>{row.label}</span>
-            <span style={{ color: "var(--text-muted)", fontSize: "var(--text-2xs)", letterSpacing: "var(--tracking-widest)" }}>NOT RECORDED</span>
-          </div>
-          );
-        })}
-
-        {expanded === "achievements" ? (
-          <div className="cm-row" style={{ display: "grid", gap: "var(--space-3)", padding: "var(--space-4) var(--space-6)", borderTop: "var(--border-hairline-style)", color: "var(--text-muted)", fontSize: "var(--text-2xs)", letterSpacing: "var(--tracking-widest)" }}>
-            {achievementList.length ? achievementList.map((item) => (
-              <div key={item.id} style={{ display: "grid", gap: "var(--space-1)" }}>
-                <span style={{ color: item.status === "ELIGIBLE" ? "var(--accent-green)" : "var(--text-secondary)" }}>{item.title} · {item.status}</span>
-                <span>{item.progress}/{item.target} · {item.nftAddress ? `NFT ${item.nftAddress}` : "NFT NOT MINTED"}</span>
-              </div>
-            )) : <span>ACHIEVEMENTS UNAVAILABLE</span>}
-          </div>
-        ) : null}
-        {expanded === "activity" ? (
-          <div className="cm-row" style={{ display: "grid", gap: "var(--space-2)", padding: "var(--space-4) var(--space-6)", borderTop: "var(--border-hairline-style)", color: "var(--text-muted)", fontSize: "var(--text-2xs)", letterSpacing: "var(--tracking-wide)" }}>
-            {activity?.entries.length ? activity.entries.slice(0, 8).map((entry) => <span key={entry.id}>{entry.kind} · {entry.summary}</span>) : <span>NO ACTIVITY RECORDED</span>}
-          </div>
-        ) : null}
+        ))}
 
         <div
           className="cm-row"
@@ -236,9 +191,24 @@ export function Profile({ onLeave }: { onLeave: () => void }) {
         </div>
       </Panel>
 
-      <Button tone="danger" size="lg" block className="cm-touch" onClick={onLeave}>
-        LEAVE THE MESH
-      </Button>
+      <Panel label="RELAY MODE">
+        <div className="cm-row" style={{ display: "flex", alignItems: "center", gap: "var(--space-5)", padding: "var(--space-5) var(--space-6)" }}>
+          <span id="relayer-label" style={{ flex: 1, fontFamily: "var(--type-label-family)", fontSize: "var(--text-2xs)", letterSpacing: "var(--tracking-widest)", color: "var(--text-secondary)" }}>
+            RELAYER
+          </span>
+          <Switch
+            checked={!profile?.offline}
+            role="switch"
+            aria-checked={!profile?.offline}
+            aria-labelledby="relayer-label"
+            className="cm-touch"
+            onClick={toggleOffline}
+          />
+        </div>
+        <div style={{ padding: "0 var(--space-6) var(--space-5)", color: "var(--text-muted)", fontSize: "var(--text-2xs)" }}>
+          Toggle relay participation without leaving the mesh.
+        </div>
+      </Panel>
 
       <p
         style={{

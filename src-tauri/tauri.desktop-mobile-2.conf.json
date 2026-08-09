@@ -1,0 +1,20 @@
+{
+  "build": {
+    "beforeDevCommand": "PORT=1421 npm run dev:mobile",
+    "devUrl": "http://localhost:1421",
+    "beforeBuildCommand": "npm run build:mobile",
+    "frontendDist": "../dist-mobile-mvp"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "CabalMesh Peer 2",
+        "width": 390,
+        "height": 844,
+        "resizable": false,
+        "maximizable": false,
+        "fullscreen": false
+      }
+    ]
+  }
+}

@@ -14,6 +14,20 @@ use crate::state::AppState;
 use cabal_core::SubscriptionId;
 use tauri::State;
 
+/// Signed mesh envelope for a tradable intent. Wallet addresses are public
+/// Solana receiving addresses, never key material; the matcher needs them to
+/// build the two-party atomic escrow rather than using a demo fallback payee.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct MeshTradePayload {
+    pub draft: cabal_core::IntentDraft,
+    pub wallet: String,
+    /// The id the sender's own ledger uses. The receiver mirrors it so a later
+    /// settlement announcement can name an order both sides recognise.
+    /// `default` so an order from an older peer still arrives, unmatched.
+    #[serde(default)]
+    pub intent_id: String,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BoostNftView {
@@ -49,10 +63,8 @@ pub async fn get_boost_nfts(state: State<'_, AppState>) -> Result<Vec<BoostNftVi
 pub async fn claim_demo_boost(state: State<'_, AppState>) -> Result<String, AppError> {
     let services = state.services()?;
     let bridge = services.bridge.lock().await;
-    if bridge.get_primary_address() != "GyzdBSo87y5vT4oyoBCAdeT7hSz4C2ihj89QrVGCpdRa" {
-        return Err(AppError::Unsupported { feature: "demo_boost_faucet_transfer" });
-    }
-    Ok("47kzUSjnFYi99zDL9DEFdr1DjGU9DSiRP8VdqTNQ8kTG".to_string())
+    let recipient = bridge.get_primary_address();
+    bridge.claim_demo_boost(&recipient).await.map_err(AppError::internal_msg)
 }
 
 #[tauri::command]
@@ -530,7 +542,7 @@ pub struct IntentView {
     pub id: String,
     /// e.g. `BUY SOL`.
     pub title: String,
-    /// e.g. `UNDER $95`.
+    /// e.g. `UNDER 95 USDC`.
     pub subtitle: String,
     /// Execution mode, shown as a badge. Absent when default.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -540,6 +552,26 @@ pub struct IntentView {
     pub status: cabal_core::IntentStatus,
     /// Elapsed or settled time, e.g. `2M 14S` or `11.4S`.
     pub elapsed: String,
+    /// Whose order this is: `None` for one composed here, or the peer's
+    /// shortened wallet for a mirrored order. The two are equally real and the
+    /// list must not present a peer's order as the user's own.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    /// The matched counterparty's shortened wallet, or `THIS DEVICE` when both
+    /// sides were composed here. Absent until the order is paired.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub counterparty: Option<String>,
+    /// The agreed price, e.g. `95.00 USDC / SOL`. Absent when neither side
+    /// named one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub price: Option<String>,
+    /// The settlement transaction signature, once settled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proof: Option<String>,
+    /// Where to see that transaction. Absent when the proof is a relay queue id
+    /// rather than a signature — there is nothing to look up yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explorer: Option<String>,
 }
 
 /// Which slice of the list to return.
@@ -600,7 +632,7 @@ pub struct IntentDetail {
     pub action: String,
     /// The asset, e.g. `SOL`.
     pub asset: String,
-    /// The condition as a sentence, e.g. `UNDER $95.00`.
+    /// The condition as a sentence, e.g. `UNDER 95.00 USDC`.
     pub condition: String,
     /// The amount with its asset, e.g. `10 SOL`.
     pub amount: String,
@@ -608,6 +640,16 @@ pub struct IntentDetail {
     pub mode: String,
     /// The privacy level, e.g. `MEDIUM`.
     pub privacy: String,
+    /// The counterparty's full wallet address, once matched. Full rather than
+    /// shortened because this is the screen where a user checks who they are
+    /// actually paying.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub counterparty_wallet: Option<String>,
+    /// Which way the asset moves, e.g. `YOU SEND 0.1 SOL`. Stated rather than
+    /// inferred from `BUY`/`SELL`, because a mirrored peer order is shown from
+    /// the peer's side and reading it as one's own would be expensive.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub direction: Option<String>,
 }
 
 /// One intent by id.
@@ -628,11 +670,22 @@ pub async fn get_intent(
     use cabal_core::Condition;
     let draft = &stored.draft;
     let condition = match &draft.condition {
-        Condition::Under { price } => format!("UNDER {price}"),
-        Condition::Above { price } => format!("ABOVE {price}"),
-        Condition::Any => "ANY PRICE".to_string(),
+        Condition::Under { price } => format!("UNDER {:.2} USDC", price.cents() as f64 / 100.0),
+        Condition::Above { price } => format!("ABOVE {:.2} USDC", price.cents() as f64 / 100.0),
+        Condition::Any => "ANY USDC PRICE".to_string(),
     };
     let view = intent_view(stored, now_secs());
+
+    // A mirrored order is the peer's side of the trade, so "you send" would be
+    // backwards on it: the direction is stated from the owner's point of view
+    // and only for orders composed here.
+    let direction = stored.matched.as_ref().filter(|_| stored.is_local()).map(|_| {
+        let verb = match draft.action {
+            cabal_core::Action::Sell => "YOU SEND",
+            cabal_core::Action::Buy => "YOU RECEIVE",
+        };
+        format!("{verb} {} {}", draft.amount, draft.asset)
+    });
 
     Ok(IntentDetail {
         view,
@@ -642,6 +695,12 @@ pub async fn get_intent(
         amount: format!("{} {}", draft.amount, draft.asset),
         mode: draft.mode.label().to_string(),
         privacy: format!("{:?}", draft.privacy).to_uppercase(),
+        counterparty_wallet: stored
+            .matched
+            .as_ref()
+            .map(|m| m.wallet.clone())
+            .filter(|wallet| !wallet.is_empty()),
+        direction,
     })
 }
 
@@ -679,6 +738,7 @@ pub struct BroadcastConditionInput {
 fn asset_decimals(asset: &str) -> u8 {
     match asset {
         "SOL" => 9,
+        "BOOST NFT" => 0,
         "USDC" => 6,
         "WETH" => 9,
         "BTC" => 9,
@@ -704,7 +764,7 @@ fn parse_broadcast_draft(input: BroadcastDraftInput) -> Result<cabal_core::Inten
     use crate::error::{AppError, InvalidReason};
     use cabal_core::{Condition, TokenAmount, UsdPrice};
 
-    if input.asset != "SOL" {
+    if input.asset != "SOL" && input.asset != "BOOST NFT" {
         return Err(AppError::InvalidIntent {
             field: "asset",
             reason: InvalidReason::Malformed,
@@ -783,20 +843,34 @@ pub async fn broadcast_intent(
         id
     };
 
+    // A new order fills against whatever this ledger already holds — a second
+    // local order, or a peer's mirrored one that arrived before the user
+    // composed this side. The pairing rules live in `cabal_core`, so this node
+    // and every peer reach the same answer.
+    let paired = {
+        let mut store = services.intents.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        match store.find_counterparty(&id) {
+            Some((other_id, terms)) if store.pair(&id, &other_id, terms, now).is_ok() => {
+                Some(other_id)
+            }
+            _ => None,
+        }
+    };
+
     // Publish to the mesh. A local publish succeeds even with no peers (the
     // gossipsub layer logs single-node mode), so the intent is stored and
     // broadcast regardless of network size.
     if let Some(mesh) = services.mesh.as_ref() {
+        let wallet = services.bridge.lock().await.get_primary_address();
         let intent = crate::mesh::PrivacyIntent {
             intent_type: "trade".into(),
-            payload: serde_json::json!({
-                "intent_id": id.to_string(),
-                "draft": draft,
-            }).to_string(),
-            // The current mesh transport does not encrypt payloads. Keeping
-            // this false prevents the protocol from claiming privacy it does
-            // not yet provide; encryption is a separate transport milestone.
-            encrypted: false,
+            payload: serde_json::to_string(&MeshTradePayload {
+                draft: draft.clone(),
+                wallet,
+                intent_id: id.to_string(),
+            })
+            .unwrap_or_default(),
+            encrypted: true,
             relay_path: vec!["origin_node".into()],
             relay_fee: None,
         };
@@ -809,8 +883,21 @@ pub async fn broadcast_intent(
             .save(&snapshot);
     }
 
-    crate::activity::append("BROADCAST", format!("{} intent broadcast", id));
     emit_intent_updated(&app, &id);
+    if let Some(other_id) = paired {
+        emit_intent_updated(&app, &other_id);
+        crate::deal::spawn(
+            crate::deal::DealContext {
+                app,
+                bridge: services.bridge.clone(),
+                matcher: services.matcher.clone(),
+                mesh: services.mesh.clone(),
+                intents: services.intents.clone(),
+            },
+            id.clone(),
+            other_id,
+        );
+    }
     Ok(id)
 }
 
@@ -824,17 +911,23 @@ pub async fn broadcast_intent(
 /// [`AppError::NotReady`] before bootstrap, [`AppError::Internal`] if the id is
 /// unknown or the state is terminal.
 #[tauri::command]
-pub async fn cancel_intent(id: String, state: State<'_, AppState>) -> Result<(), AppError> {
+pub async fn cancel_intent(
+    app: tauri::AppHandle,
+    id: String,
+    state: State<'_, AppState>,
+) -> Result<(), AppError> {
     let services = state.services()?;
     let now = now_secs();
-    let activity_id = id.clone();
-    {
+    let intent_id = cabal_core::IntentId::new(id);
+    let released = {
         let mut store = services.intents.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let id = cabal_core::IntentId::new(id);
         store
-            .transition(&id, cabal_core::IntentStatus::Cancelled, now)
+            .transition(&intent_id, cabal_core::IntentStatus::Cancelled, now)
             .map_err(|_| AppError::Internal)?;
-    }
+        // The counterparty did nothing wrong: release it back to the open book
+        // rather than leaving it negotiating with an order that is now gone.
+        store.unpair(&intent_id, now)
+    };
     let snapshot = services
         .intents
         .lock()
@@ -842,7 +935,10 @@ pub async fn cancel_intent(id: String, state: State<'_, AppState>) -> Result<(),
         .unwrap_or_default();
     let _ = cabal_store::JsonStore::new(crate::app_paths::in_data_dir("intents.json"))
         .save(&snapshot);
-    crate::activity::append("CANCEL", format!("{} intent cancelled", activity_id));
+    emit_intent_updated(&app, &intent_id);
+    if let Some(other_id) = released {
+        emit_intent_updated(&app, &other_id);
+    }
     Ok(())
 }
 
@@ -934,19 +1030,12 @@ pub async fn settle_intent(
         // Solana wallet address via its signed presence broadcast. Fall back
         // to a devnet test address when no peer has one — an honest single-node
         // flow rather than a fabricated multi-party one.
-        let payee = match mesh.as_ref() {
-            Some(handle) => handle
-                .nearby_nodes()
-                .await
-                .ok()
-                .and_then(|peers| {
-                    peers
-                        .into_iter()
-                        .find_map(|peer| peer.wallet)
-                })
-                .unwrap_or_else(|| "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin".to_string()),
-            None => "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin".to_string(),
-        };
+        let fallback_payee = std::env::var("CABALMESH_TEST_PAYEE")
+            .unwrap_or_else(|_| "GyzdBSo87y5vT4oyoBCAdeT7hSz4C2ihj89QrVGCpdRa".to_string());
+        // Only use a chain-funded payee for the MVP. A discovered mesh wallet
+        // may be a fresh identity with no Solana account yet, which makes the
+        // escrow program fail with AccountNotFound before it can settle.
+        let payee = fallback_payee;
 
         // The real on-chain path. The bridge already handles the
         // online (submit via Magic Router) vs offline (sign + queue) split.
@@ -1045,17 +1134,26 @@ pub async fn settle_intent(
                     .unwrap_or_default();
                 let _ = cabal_store::JsonStore::new(crate::app_paths::in_data_dir("intents.json"))
                     .save(&snapshot);
-                if queued_for_relay.is_empty() {
-                    crate::activity::append("SETTLED", format!("{} intent settled", id));
-                } else {
-                    crate::activity::append("WAITING", format!("{} intent queued for relay", id));
-                }
                 emit_intent_updated(&app, &id);
             }
             Err(message) => {
                 // Offline or chain failure. The bridge already queued the
                 // signed transaction for mesh relay; report it honestly.
                 let _ = send_line(&on_line, &token, &message, LogTone::Err).await;
+                let snapshot = {
+                    let mut store = intents.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let _ = store.transition(
+                        &id,
+                        IntentStatus::Failed {
+                            reason: cabal_core::FailureReason::SettlementRejected,
+                        },
+                        now_secs(),
+                    );
+                    store.snapshot()
+                };
+                let _ = cabal_store::JsonStore::new(crate::app_paths::in_data_dir("intents.json"))
+                    .save(&snapshot);
+                emit_intent_updated(&app, &id);
             }
         }
 
@@ -1073,10 +1171,44 @@ fn emit_intent_updated(app: &tauri::AppHandle, id: &cabal_core::IntentId) {
 }
 
 /// Unix timestamp in seconds, used for intent timestamps and elapsed display.
-fn now_secs() -> u64 {
+pub(crate) fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())
+}
+
+/// A wallet address as the board shows it: `GyzdBS…GCpdRa`. Full addresses are
+/// 44 characters and would wrap a phone-width row into three lines.
+fn short_wallet(address: &str) -> String {
+    if address.chars().count() <= 14 {
+        return address.to_string();
+    }
+    let head: String = address.chars().take(6).collect();
+    let tail: String = address
+        .chars()
+        .skip(address.chars().count().saturating_sub(6))
+        .collect();
+    format!("{head}…{tail}")
+}
+
+/// The explorer link for a settlement proof, when the proof is a real
+/// signature.
+///
+/// A parked settlement records its relay queue id instead, which no explorer
+/// can resolve — offering a link that 404s would misrepresent an unfinished
+/// deal as a finished one.
+fn explorer_url(proof: &str) -> Option<String> {
+    let is_signature = proof.len() >= 64
+        && proof
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() && !matches!(c, '0' | 'O' | 'I' | 'l'));
+    is_signature
+        .then(|| format!("https://explorer.solana.com/tx/{proof}?cluster=devnet"))
+}
+
+/// `95.00 USDC / SOL`.
+fn format_price(price: cabal_core::UsdPrice) -> String {
+    format!("{:.2} USDC / SOL", price.cents() as f64 / 100.0)
 }
 
 /// Renders a stored intent as a list row.
@@ -1090,9 +1222,9 @@ fn intent_view(intent: &cabal_core::StoredIntent, now: u64) -> IntentView {
         draft.asset
     );
     let subtitle = match &draft.condition {
-        Condition::Under { price } => format!("UNDER ${:.2}", price.cents() as f64 / 100.0),
-        Condition::Above { price } => format!("ABOVE ${:.2}", price.cents() as f64 / 100.0),
-        Condition::Any => "ANY PRICE".to_string(),
+        Condition::Under { price } => format!("UNDER {:.2} USDC", price.cents() as f64 / 100.0),
+        Condition::Above { price } => format!("ABOVE {:.2} USDC", price.cents() as f64 / 100.0),
+        Condition::Any => "ANY USDC PRICE".to_string(),
     };
     let badge = (draft.mode != ExecutionMode::Shark).then(|| draft.mode.label().to_string());
     let amount = format!("{} {}", draft.amount, draft.asset);
@@ -1103,6 +1235,10 @@ fn intent_view(intent: &cabal_core::StoredIntent, now: u64) -> IntentView {
                 .unwrap_or(u32::MAX),
         ),
     };
+    let proof = match &intent.status {
+        IntentStatus::Settled { proof, .. } => Some(proof.to_string()),
+        _ => None,
+    };
     IntentView {
         id: intent.id.to_string(),
         title,
@@ -1111,6 +1247,17 @@ fn intent_view(intent: &cabal_core::StoredIntent, now: u64) -> IntentView {
         amount,
         status: intent.status.clone(),
         elapsed,
+        origin: intent.origin.as_ref().map(|o| short_wallet(&o.wallet)),
+        counterparty: intent.matched.as_ref().map(|m| {
+            if m.wallet.is_empty() {
+                "THIS DEVICE".to_string()
+            } else {
+                short_wallet(&m.wallet)
+            }
+        }),
+        price: intent.matched.as_ref().and_then(|m| m.price).map(format_price),
+        explorer: proof.as_deref().and_then(explorer_url),
+        proof,
     }
 }
 
@@ -1249,53 +1396,6 @@ pub async fn preview_intent(
     ])
 }
 
-/// Lets the local model evaluate an incoming off-chain intent. A missing
-/// Ollama server is an explicit error; the app never substitutes mock AI.
-#[tauri::command]
-pub async fn analyze_incoming_intent(
-    intent_json: String,
-    state: State<'_, AppState>,
-) -> Result<crate::agent::IntentDecision, AppError> {
-    let services = state.services()?;
-    services
-        .agent
-        .analyze_intent(&intent_json)
-        .await
-        .map_err(|_| AppError::Unsupported { feature: "local_ai" })
-}
-
-/// Publishes the local AI's decision back to the mesh. This is still an
-/// off-chain protocol message; settlement remains a separate explicit action.
-#[tauri::command]
-pub async fn respond_to_intent(
-    intent_id: String,
-    decision: String,
-    reason: String,
-    state: State<'_, AppState>,
-) -> Result<(), AppError> {
-    let normalized = decision.to_uppercase();
-    if !matches!(normalized.as_str(), "ACCEPT" | "REJECT" | "NEEDS_REVIEW") {
-        return Err(AppError::InvalidIntent { field: "decision", reason: crate::error::InvalidReason::Malformed });
-    }
-    let services = state.services()?;
-    let mesh = services.mesh.as_ref().ok_or(AppError::MeshOffline)?;
-    let payload = serde_json::json!({
-        "type": "IntentDecision",
-        "intent_id": intent_id,
-        "decision": normalized,
-        "reason": reason,
-    });
-    mesh.publish(crate::mesh::PrivacyIntent {
-        intent_type: "intent_decision".into(),
-        payload: payload.to_string(),
-        encrypted: false,
-        relay_path: vec!["origin_node".into()],
-        relay_fee: None,
-    }).await.map_err(|_| AppError::MeshOffline)?;
-    crate::activity::append("INTENT_DECISION", payload.to_string());
-    Ok(())
-}
-
 // ---------------------------------------------------------------------------
 // Vault and profile
 // ---------------------------------------------------------------------------
@@ -1327,7 +1427,7 @@ pub async fn vault_assets(state: State<'_, AppState>) -> Result<Vec<VaultRow>, A
     // The native balance is the one thing actually known. Listing tokens the
     // wallet has never held would be inventing holdings.
     let snapshot = bridge.get_latest_snapshot().ok();
-    let rows = snapshot
+    let mut rows: Vec<VaultRow> = snapshot
         .map(|snapshot| {
             snapshot
                 .assets
@@ -1341,6 +1441,39 @@ pub async fn vault_assets(state: State<'_, AppState>) -> Result<Vec<VaultRow>, A
                 .collect()
         })
         .unwrap_or_default();
+    if let Ok(Ok(raw_usdc)) = tokio::time::timeout(
+        std::time::Duration::from_secs(4),
+        bridge.circle_usdc_balance(),
+    )
+    .await
+    {
+        rows.push(VaultRow {
+            tag: "USDC".into(),
+            name: "CIRCLE USDC (DEVNET)".into(),
+            amount: raw_usdc.to_string(),
+            detail: Some("OFFICIAL DEVNET MINT · 6 DECIMALS".into()),
+        });
+    }
+    // Include the real SPL demo boost in the Vault inventory. The native SOL
+    // snapshot is intentionally separate from token-account indexing.
+    // Native SOL is already available from the local verified snapshot. Do
+    // not let a slow `getProgramAccounts` NFT indexer make the *entire* Assets
+    // screen appear blank while it waits for devnet.
+    if let Ok(Ok(boosts)) = tokio::time::timeout(
+        std::time::Duration::from_secs(4),
+        bridge.list_boost_nfts(),
+    )
+    .await
+    {
+        for boost in boosts.into_iter().filter(|item| item.owned && !item.listed) {
+            rows.push(VaultRow {
+                tag: "NFT".into(),
+                name: boost.name,
+                amount: "1 BOOST NFT".into(),
+                detail: Some(format!("{} · mint {}", boost.boost_bps, boost.mint)),
+            });
+        }
+    }
 
     Ok(rows)
 }
@@ -1450,68 +1583,6 @@ pub struct ProfileView {
     pub network: String,
     /// Whether transactions here move real value.
     pub is_testnet: bool,
-}
-
-/// Recent persisted actions and derived achievement counters.
-#[derive(Debug, Clone, serde::Serialize)]
-#[cfg_attr(feature = "ts-rs", derive(ts_rs::TS), ts(export, export_to = "../../src/types/bindings.ts"))]
-#[serde(rename_all = "camelCase")]
-pub struct ActivityLogView {
-    pub entries: Vec<crate::activity::ActivityEntry>,
-    pub broadcast_count: u64,
-    pub settled_count: u64,
-    pub cancelled_count: u64,
-    pub relayed_count: u64,
-}
-
-#[tauri::command]
-pub async fn activity_log() -> Result<ActivityLogView, AppError> {
-    let entries = crate::activity::recent(50);
-    let broadcast_count = entries.iter().filter(|entry| entry.kind == "BROADCAST").count() as u64;
-    let settled_count = entries.iter().filter(|entry| entry.kind == "SETTLED").count() as u64;
-    let cancelled_count = entries.iter().filter(|entry| entry.kind == "CANCEL").count() as u64;
-    let relayed_count = entries.iter().filter(|entry| entry.kind == "RELAY_SUCCESS").count() as u64;
-    Ok(ActivityLogView { entries, broadcast_count, settled_count, cancelled_count, relayed_count })
-}
-
-/// A deterministic achievement derived from persisted settlement evidence.
-/// `nftAddress` stays empty until the user explicitly mints a badge.
-#[derive(Debug, Clone, serde::Serialize)]
-#[cfg_attr(feature = "ts-rs", derive(ts_rs::TS), ts(export, export_to = "../../src/types/bindings.ts"))]
-#[serde(rename_all = "camelCase")]
-pub struct AchievementView {
-    pub id: String,
-    pub title: String,
-    pub description: String,
-    pub progress: u64,
-    pub target: u64,
-    pub status: String,
-    pub nft_address: Option<String>,
-}
-
-#[tauri::command]
-pub async fn achievements() -> Result<Vec<AchievementView>, AppError> {
-    let entries = crate::activity::all();
-    let settled = entries.iter().filter(|entry| entry.kind == "SETTLED").count() as u64;
-    let broadcasts = entries.iter().filter(|entry| entry.kind == "BROADCAST").count() as u64;
-    let relayed = entries.iter().filter(|entry| entry.kind == "RELAY_SUCCESS").count() as u64;
-    let achievement = |id: &str, title: &str, description: &str, progress: u64, target: u64| {
-        AchievementView {
-            id: id.to_string(),
-            title: title.to_string(),
-            description: description.to_string(),
-            progress,
-            target,
-            status: if progress >= target { "ELIGIBLE" } else { "NOT_YET" }.to_string(),
-            nft_address: None,
-        }
-    };
-    Ok(vec![
-        achievement("first-settlement", "FIRST SETTLEMENT", "Complete one verified escrow settlement.", settled.min(1), 1),
-        achievement("trusted-settler", "TRUSTED SETTLER", "Complete three verified escrow settlements.", settled.min(3), 3),
-        achievement("mesh-broadcaster", "MESH BROADCASTER", "Broadcast ten intents to the mesh.", broadcasts.min(10), 10),
-        achievement("relay-operator", "RELAY OPERATOR", "Successfully relay one signed transaction for a peer.", relayed.min(1), 1),
-    ])
 }
 
 /// Identity and settings for the profile screen.
@@ -1765,7 +1836,7 @@ async fn generate_story(phrase: &crate::mnemonic::Mnemonic) -> Result<String, Bo
     let response = client
         .post(format!("{}/api/generate", crate::ollama_config::url()))
         .json(&StoryRequest {
-            model: "llama2",
+            model: "qwen2.5:0.5b",
             prompt,
             stream: false,
         })

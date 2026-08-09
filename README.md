@@ -24,7 +24,7 @@ In this network, you are a **Nobody**. Every trace—from your physical location
    - Confidential Compute (FHE/MPC) integration ready
 
 3. **The Settlement Layer** (Solana)
-   - An on-chain `cabal_escrow` Anchor program (Solana) locks/releases SOL for a deal
+   - An on-chain `cabal_escrow` Anchor program locks an atomic SOL ↔ Circle USDC devnet trade
    - MagicBlock Ephemeral Rollups for instant settlement
    - Instant Session keys for sub-second mesh-side agent authority delegation
 
@@ -40,8 +40,8 @@ compiled in as the default escrow contract, so mobile builds do not depend on a 
 
 The Anchor deployment transaction is recorded in
 [`docs/mvp-p1-p5-checklist.md`](docs/mvp-p1-p5-checklist.md).
-The latest program upgrade transaction is
-`BkNHQWxuZV29CqxZ7ptJdaVEvL3SaZXCgpha4DYrJ6baJ77eSvcEqesPBkEPNNijHCuyKj3CTpEFurZRBzW4DNg`.
+The latest atomic TradeEscrow upgrade transaction is
+[`4FTKHJmyNPsier1Q6znx5FeayN4WDL37TwAfgQjaWCPrEy8LMnzf7DfXFm5Largw83Nyxjimr3aEmAnP9Y5neV6a`](https://explorer.solana.com/tx/4FTKHJmyNPsier1Q6znx5FeayN4WDL37TwAfgQjaWCPrEy8LMnzf7DfXFm5Largw83Nyxjimr3aEmAnP9Y5neV6a?cluster=devnet).
 The isolated boost program deploy transaction is
 `2mN3R2gZUAbhfyZ6Viu3bkdvHzemuLEzKRUpSnfjGb4ofwzcw8qzAivrfHPxwrk2cghHPLj6Xhu91jqD8zGRCein`.
 For the MVP demo wallet, a devnet boost mint is preloaded:
@@ -114,14 +114,14 @@ The main UI displays:
 ### Example Intent
 
 ```
-Buy 10 SOL under $95 using Shark Mode
+Buy 10 SOL under 95 USDC using Shark Mode
 ```
 
 The system will:
 1. Generate a Noir ZK-proof of your balance
 2. Negotiate via Ollama AI (localhost:11434)
 3. Broadcast encrypted intent to mesh
-4. Settle via the on-chain escrow program on Solana when online
+4. Match counterparty wallets and settle through the on-chain escrow program when online
 
 ### Going Offline
 
@@ -172,15 +172,15 @@ Noir proofs ensure your AI agent followed your "Aggressive" strategy without che
 ### 3. Sybil-Resistant ZK-Reputation
 Nodes prove honesty via zero-knowledge without revealing interaction history.
 
-### 4. On-Chain Escrow
-Deals lock native SOL in a `cabal_escrow` Anchor program (deposit → release, or depositor/expiry-based refund) instead of being purely simulated. MagicBlock Ephemeral Rollups settle instantly.
+### 4. Atomic SOL ↔ USDC escrow
+`cabal_escrow` includes a two-sided `TradeEscrow` PDA. The seller opens a trade and locks SOL; the buyer locks Circle USDC devnet (mint `4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU`, six decimals). `release_trade` transfers both legs in one Solana transaction, so a failure rolls back both transfers. `refund_trade` returns funded legs after expiry.
 
 ### Solana asset settlement
 
-The active mobile path uses the Solana devnet `cabal_escrow` program above and
-settles native SOL. The former Avalanche ERC-721 voucher and marketplace
-artifacts have been removed; boost NFTs use the dedicated Solana `cabal_boost`
-program above.
+The mesh envelope carries the counterparty's public Solana receiving wallet;
+private keys never leave the encrypted local vault. The former Avalanche ERC-721
+voucher and marketplace artifacts have been removed; boost NFTs use the
+dedicated Solana `cabal_boost` program above.
 
 ## 🧪 Testing
 
@@ -258,12 +258,20 @@ npx hardhat test   # Runs against Hardhat's in-memory network, no real funds
 ## 🗺️ Roadmap / Deferred Ideas
 
 ### Buyer/seller LLM-to-LLM price negotiation
-Currently, buying only matches a buyer's intent against a listing's **fixed** price (`match_intent_to_listings` in `src-tauri/src/matcher.rs`) — there's no back-and-forth negotiation between the two sides' local agents. A real version of this would need:
+The MVP runs a single guarded local-LLM proposal (`qwen2.5:0.5b` through Ollama) after two mesh intents match. A full back-and-forth negotiation protocol would additionally need:
 - A negotiation protocol over the mesh (offer → counter-offer → accept/reject message types, similar in spirit to the existing `relay_tx`/`content_request` intent types in `mesh.rs`).
 - Hard guardrails enforced in Rust (not trusted to the model): the buyer's agent must never bid above the user's price ceiling, the seller's agent must never accept below their floor.
 - A round limit, so two agents can't loop forever.
 
-**Known risk:** the local model (llama2 via Ollama) is not very reliable — see the JSON-parsing robustness fixes in `src-tauri/src/llm_json.rs`, needed because the model often doesn't follow "respond only with JSON" instructions. A multi-turn negotiation multiplies that risk (inconsistent replies between rounds, possible bad-price "agreement" from a parsing slip). Deferred until the single-shot matching flow is solid.
+### Atomic worker wiring
+
+The deployed contract is ready for `open_trade → lock_trade_usdc → release_trade`.
+The mesh worker currently exchanges the counterparty wallet and holds a matched
+order at `WAITING FOR BOTH SOL + USDC LOCKS` while the final shared `trade_id`
+coordinator is being wired. It does **not** fall back to the old one-sided SOL
+escrow for a matched SOL/USDC order.
+
+**Guardrail:** the local model is never trusted to authorize a transfer; Rust validates every proposal against the two declared price conditions before the settlement worker can continue.
 
 ## 🤝 Contributing
 

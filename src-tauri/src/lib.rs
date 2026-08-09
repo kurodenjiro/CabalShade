@@ -53,6 +53,12 @@ pub mod subscriptions;
 /// The reshaped command surface. See src/commands.rs.
 pub mod commands;
 
+/// Matched pairs, from agreement to a settled trade. See src/deal.rs.
+pub mod deal;
+
+/// Carrying other peers' offline-signed transactions. See src/relay.rs.
+pub mod relay;
+
 /// Presentation contracts shared with the frontend. See src/bindings.rs.
 pub mod bindings;
 
@@ -75,7 +81,6 @@ use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tauri::{Manager, Emitter};
-
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -114,7 +119,7 @@ pub fn run() {
             let app_handle = app.handle().clone();
 
             // Create consistent Ollama instance
-            let ollama_manager = Arc::new(OllamaManager::new(Some("llama2".to_string())));
+            let ollama_manager = Arc::new(OllamaManager::new(Some("qwen2.5:0.5b".to_string())));
             let ollama_init = ollama_manager.clone();
             
             // Initialize Ollama in background
@@ -216,8 +221,167 @@ pub fn run() {
 
                         // Forward Mesh Events to Frontend
                         let handle_clone = app_handle.clone();
+                        let remote_intents = intents.clone();
+                        let auto_settle_bridge = bridge.clone();
+                        let auto_settle_matcher = Arc::new(MatchAgent::new(None));
+                        let rebroadcast_mesh = mesh_handle.clone();
+                        let local_intents = intents.clone();
+                        let rebroadcast_bridge = bridge.clone();
+                        let deal_mesh = mesh_handle.clone();
+                        let relay_bridge = bridge.clone();
+                        let relay_mesh_handle = mesh_handle.clone();
+                        let replay_bridge = bridge.clone();
+                        let replay_mesh = mesh_handle.clone();
+                        let replay_intents = intents.clone();
                         tokio::spawn(async move {
+                            let relay_context = || crate::relay::RelayContext {
+                                app: handle_clone.clone(),
+                                bridge: relay_bridge.clone(),
+                                mesh: Some(relay_mesh_handle.clone()),
+                            };
                             while let Some(event) = event_rx.recv().await {
+                                if matches!(&event, crate::mesh::MeshEvent::PeerDiscovered { .. }) {
+                                    // A settlement announced while this peer was away reached
+                                    // nobody: gossipsub does not hold messages for absent
+                                    // subscribers. Reconnection is the moment to say it again.
+                                    crate::deal::replay_settlements(crate::deal::DealContext {
+                                        app: handle_clone.clone(),
+                                        bridge: replay_bridge.clone(),
+                                        matcher: auto_settle_matcher.clone(),
+                                        mesh: Some(replay_mesh.clone()),
+                                        intents: replay_intents.clone(),
+                                    });
+                                }
+                                if matches!(&event, crate::mesh::MeshEvent::PeerDiscovered { .. }) {
+                                    // Intents composed before the other demo app joined must
+                                    // still be visible to it. Wait briefly for the mDNS dial to
+                                    // finish, then re-announce active drafts through the real
+                                    // gossipsub transport.
+                                    let mesh = rebroadcast_mesh.clone();
+                                    let intents = local_intents.clone();
+                                    let bridge = rebroadcast_bridge.clone();
+                                    tokio::spawn(async move {
+                                        tokio::time::sleep(std::time::Duration::from_millis(900)).await;
+                                        // Only this device's own still-unmatched orders: a
+                                        // mirror belongs to the peer that sent it, and an
+                                        // order already paired is spoken for.
+                                        let orders = intents
+                                            .lock()
+                                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                            .all()
+                                            .into_iter()
+                                            .filter(|entry| entry.is_local() && entry.is_open())
+                                            .map(|entry| (entry.id.to_string(), entry.draft.clone()))
+                                            .collect::<Vec<_>>();
+                                        let wallet = bridge.lock().await.get_primary_address();
+                                        for (intent_id, draft) in orders {
+                                            let _ = mesh.publish(crate::mesh::PrivacyIntent {
+                                                intent_type: "trade".into(),
+                                                payload: serde_json::to_string(&crate::commands::MeshTradePayload { draft, wallet: wallet.clone(), intent_id }).unwrap_or_default(),
+                                                encrypted: true,
+                                                relay_path: vec!["origin_node".into()],
+                                                relay_fee: None,
+                                            }).await;
+                                        }
+                                    });
+                                }
+                                // Relaying a peer's offline-signed transaction, and hearing
+                                // back about our own. See src/relay.rs.
+                                match &event {
+                                    crate::mesh::MeshEvent::RelayTxReceived { queue_id, raw_tx_hex, summary } => {
+                                        crate::relay::on_relay_request(
+                                            relay_context(),
+                                            queue_id.clone(),
+                                            raw_tx_hex.clone(),
+                                            summary.clone(),
+                                        );
+                                    }
+                                    crate::mesh::MeshEvent::RelayConfirmed { queue_id, status, tx_hash } => {
+                                        crate::relay::on_relay_report(
+                                            relay_context(),
+                                            queue_id.clone(),
+                                            status.clone(),
+                                            tx_hash.clone(),
+                                        );
+                                    }
+                                    _ => {}
+                                }
+
+                                if let crate::mesh::MeshEvent::IntentReceived { intent } = &event {
+                                    let context = || crate::deal::DealContext {
+                                        app: handle_clone.clone(),
+                                        bridge: auto_settle_bridge.clone(),
+                                        matcher: auto_settle_matcher.clone(),
+                                        mesh: Some(deal_mesh.clone()),
+                                        intents: remote_intents.clone(),
+                                    };
+
+                                    // A counterparty announcing that it has paid. Verified against
+                                    // the chain before it is believed — see src/deal.rs.
+                                    if intent.intent_type == "trade_settled" {
+                                        if let Ok(announcement) =
+                                            serde_json::from_str::<crate::deal::TradeSettled>(&intent.payload)
+                                        {
+                                            crate::deal::on_trade_settled(context(), announcement);
+                                        }
+                                        let _ = handle_clone.emit("mesh-event", event);
+                                        continue;
+                                    }
+
+                                    // A counterparty asking whether we have paid it yet.
+                                    if intent.intent_type == "settlement_query" {
+                                        if let Ok(query) =
+                                            serde_json::from_str::<crate::deal::SettlementQuery>(&intent.payload)
+                                        {
+                                            crate::deal::on_settlement_query(context(), query);
+                                        }
+                                        let _ = handle_clone.emit("mesh-event", event);
+                                        continue;
+                                    }
+
+                                    if let Ok(payload) = serde_json::from_str::<crate::commands::MeshTradePayload>(&intent.payload) {
+                                        let remote_wallet = payload.wallet;
+                                        if remote_wallet.is_empty() { continue; }
+                                        let now = crate::commands::now_secs();
+                                        let mut store = remote_intents.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                                        // Already mirrored: a peer re-announces its open orders
+                                        // whenever it discovers someone, and one order must not
+                                        // become several rows that each try to settle.
+                                        if !payload.intent_id.is_empty()
+                                            && store.by_origin(&payload.intent_id).is_some()
+                                        {
+                                            continue;
+                                        }
+                                        let remote_id = store.create_remote(
+                                            payload.draft,
+                                            cabal_core::RemoteOrigin {
+                                                intent_id: payload.intent_id,
+                                                wallet: remote_wallet,
+                                            },
+                                            now,
+                                        );
+                                        let _ = store.transition(&remote_id, cabal_core::IntentStatus::Broadcast { route_len: intent.relay_path.len().min(u8::MAX as usize) as u8 }, now);
+                                        let paired = match store.find_counterparty(&remote_id) {
+                                            Some((other_id, terms))
+                                                if store.pair(&remote_id, &other_id, terms, now).is_ok() =>
+                                            {
+                                                Some(other_id)
+                                            }
+                                            _ => None,
+                                        };
+                                        let snapshot = store.snapshot();
+                                        drop(store);
+                                        let _ = cabal_store::JsonStore::new(crate::app_paths::in_data_dir("intents.json")).save(&snapshot);
+                                        // Remote intent arrival changes the list just as much as a
+                                        // local broadcast. Notify the existing UI listener so the
+                                        // matched state appears without a manual refresh.
+                                        let _ = handle_clone.emit("intent-updated", serde_json::json!({ "id": remote_id.as_str() }));
+                                        if let Some(other_id) = paired {
+                                            let _ = handle_clone.emit("intent-updated", serde_json::json!({ "id": other_id.as_str() }));
+                                            crate::deal::spawn(context(), other_id, remote_id);
+                                        }
+                                    }
+                                }
                                 let _ = handle_clone.emit("mesh-event", event);
                             }
                         });
@@ -230,12 +394,51 @@ pub fn run() {
                         // without the desktop UI.
                         let resume_bridge = bridge.clone();
                         let resume_mesh = mesh_handle.clone();
+                        let chase_context = crate::deal::DealContext {
+                            app: app_handle.clone(),
+                            bridge: bridge.clone(),
+                            matcher: Arc::new(MatchAgent::new(None)),
+                            mesh: Some(mesh_handle.clone()),
+                            intents: intents.clone(),
+                        };
                         tokio::spawn(async move {
                             let mut ticker =
                                 tokio::time::interval(std::time::Duration::from_secs(10));
                             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                            let mut passes = 0_u32;
                             loop {
                                 ticker.tick().await;
+
+                                // This node's own queue first. A transaction signed while
+                                // the RPC was down is this device's to submit the moment
+                                // it can — waiting for a peer to volunteer would be
+                                // slower and, alone on the mesh, never.
+                                //
+                                // Gated on reachability, and deliberately so: every
+                                // bridge call shares one mutex, and submitting into an
+                                // unreachable RPC holds that mutex for as long as the
+                                // socket takes to give up. On the exact node this matters
+                                // for — the offline one — that starves the relay reports
+                                // and settlement chase that are trying to finish the
+                                // deal. `check_rpc_reachable` is bounded at four seconds.
+                                let has_queue = !resume_bridge.lock().await.get_pending_relay_txs().is_empty();
+                                if has_queue && resume_bridge.lock().await.check_rpc_reachable().await {
+                                    match resume_bridge.lock().await.drain_pending().await {
+                                        Ok(0) => {}
+                                        Ok(count) => tracing::info!(count, "submitted queued transactions after reconnect"),
+                                        Err(error) => tracing::debug!(%error, "queue drain failed"),
+                                    }
+                                }
+
+                                // Every third pass: ask for anything owed to us. Slower
+                                // than the drain because it talks to peers and the chain,
+                                // and nothing here is urgent — the funds, if they moved,
+                                // have already moved.
+                                passes = passes.wrapping_add(1);
+                                if passes % 3 == 0 {
+                                    crate::deal::chase_pending_settlements(chase_context.clone());
+                                }
+
                                 let released = {
                                     let bridge = resume_bridge.lock().await;
                                     bridge.resume_pending_settlements().await
@@ -267,6 +470,17 @@ pub fn run() {
                                         .await;
                                 }
                             }
+                        });
+
+                        // Two compatible orders composed either side of a
+                        // restart missed both matching events; pair them now
+                        // that the ledger and the mesh are both up.
+                        crate::deal::reconcile(crate::deal::DealContext {
+                            app: app_handle.clone(),
+                            bridge: bridge.clone(),
+                            matcher: Arc::new(MatchAgent::new(None)),
+                            mesh: Some(mesh_handle.clone()),
+                            intents: intents.clone(),
                         });
 
                         state.set_services(state::Services {

@@ -46,7 +46,7 @@ action: string,
  */
 asset: string, 
 /**
- * The condition as a sentence, e.g. `UNDER $95.00`.
+ * The condition as a sentence, e.g. `UNDER 95.00 USDC`.
  */
 condition: string, 
 /**
@@ -60,7 +60,19 @@ mode: string,
 /**
  * The privacy level, e.g. `MEDIUM`.
  */
-privacy: string, };
+privacy: string, 
+/**
+ * The counterparty's full wallet address, once matched. Full rather than
+ * shortened because this is the screen where a user checks who they are
+ * actually paying.
+ */
+counterpartyWallet: string | null, 
+/**
+ * Which way the asset moves, e.g. `YOU SEND 0.1 SOL`. Stated rather than
+ * inferred from `BUY`/`SELL`, because a mirrored peer order is shown from
+ * the peer's side and reading it as one's own would be expensive.
+ */
+direction: string | null, };
 
 /**
  * Which slice of the list to return.
@@ -85,7 +97,7 @@ export type IntentView = { id: string,
  */
 title: string, 
 /**
- * e.g. `UNDER $95`.
+ * e.g. `UNDER 95 USDC`.
  */
 subtitle: string, 
 /**
@@ -99,7 +111,32 @@ status: IntentStatus,
 /**
  * Elapsed or settled time, e.g. `2M 14S` or `11.4S`.
  */
-elapsed: string, };
+elapsed: string, 
+/**
+ * Whose order this is: `None` for one composed here, or the peer's
+ * shortened wallet for a mirrored order. The two are equally real and the
+ * list must not present a peer's order as the user's own.
+ */
+origin: string | null, 
+/**
+ * The matched counterparty's shortened wallet, or `THIS DEVICE` when both
+ * sides were composed here. Absent until the order is paired.
+ */
+counterparty: string | null, 
+/**
+ * The agreed price, e.g. `95.00 USDC / SOL`. Absent when neither side
+ * named one.
+ */
+price: string | null, 
+/**
+ * The settlement transaction signature, once settled.
+ */
+proof: string | null, 
+/**
+ * Where to see that transaction. Absent when the proof is a relay queue id
+ * rather than a signature — there is nothing to look up yet.
+ */
+explorer: string | null, };
 
 /**
  * One rendered terminal line.
@@ -184,11 +221,6 @@ reputation: string, memberSince: string, offline: boolean, network: string,
  * Whether transactions here move real value.
  */
 isTestnet: boolean, };
-
-export type ActivityEntry = { id: string, kind: string, summary: string, createdAt: number, };
-export type ActivityLogView = { entries: Array<ActivityEntry>, broadcastCount: number, settledCount: number, cancelledCount: number, relayedCount: number, };
-export type AchievementView = { id: string, title: string, description: string, progress: number, target: number, status: string, nftAddress: string | null, };
-export type IntentDecision = { decision: string, confidence: number, reason: string, };
 
 /**
  * A settlement proof hash. Displayed lowercase and unabbreviated.

@@ -85,6 +85,11 @@
     "allow-export-mnemonic",
     "allow-copy-mnemonic",
     "allow-import-mnemonic",
-    "allow-suggest-mnemonic-word"
+    "allow-suggest-mnemonic-word",
+    "allow-get-boost-nfts",
+    "allow-claim-demo-boost",
+    "allow-use-boost-nft",
+    "allow-list-boost-nft",
+    "allow-buy-boost-nft"
   ]
 }

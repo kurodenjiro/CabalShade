@@ -3,6 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { Panel, StatBlock, StatusDot, Terminal } from "../ds";
 import { useLogStream } from "../state/useLogStream";
 import type { LogLine, MeshSnapshotView } from "../types/bindings";
+import type { BoostNft } from "../boosts";
+import { boostExpired, boostLabel } from "../boosts";
 
 /** Visible ticker lines. The rest are retained but scrolled. */
 const VISIBLE = 4;
@@ -25,6 +27,7 @@ const RETAINED = 200;
 export function Home() {
   const [snapshot, setSnapshot] = useState<MeshSnapshotView | null>(null);
   const [lines, setLines] = useState<LogLine[]>([]);
+  const [boost, setBoost] = useState<BoostNft | null>(null);
   const isTauriRuntime = Boolean((window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__);
 
   useEffect(() => {
@@ -41,10 +44,16 @@ export function Home() {
     };
 
     refresh();
+    const refreshBoost = () => invoke<BoostNft[]>("get_boost_nfts")
+      .then((items) => setBoost(items.find((item) => item.owned && !boostExpired(item)) ?? null))
+      .catch(() => setBoost(null));
+    refreshBoost();
+    const boostTimer = window.setInterval(refreshBoost, 5_000);
     const timer = window.setInterval(refresh, 5_000);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
+      window.clearInterval(boostTimer);
     };
   }, []);
 
@@ -93,6 +102,7 @@ export function Home() {
 
           <Field label="NODE ID" value={snapshot?.nodeId ?? "—"} />
           <Field label="UPTIME" value={snapshot?.uptime ?? "—"} />
+          <Field label="RELAY BOOST" value={boost ? boostLabel(boost) : "NONE"} />
         </div>
       </Panel>
 

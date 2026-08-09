@@ -1,7 +1,4 @@
-import { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import { Button, Logo } from "../ds";
-import type { SessionStatus } from "../types/bindings";
 
 /**
  * First screen. Two offers, no chrome.
@@ -14,28 +11,6 @@ import type { SessionStatus } from "../types/bindings";
  * remains available while Home reflects readiness as it arrives.
  */
 export function Splash({ onEnter }: { onEnter: () => void }) {
-  const [status, setStatus] = useState<SessionStatus | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    const poll = () => {
-      invoke<SessionStatus>("session_status")
-        .then((next) => {
-          if (!cancelled) setStatus(next);
-        })
-        .catch(() => {
-          /* Browser preview may not expose Tauri IPC; keep the splash actionable. */
-        });
-    };
-    poll();
-    const interval = window.setInterval(poll, 2_000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(interval);
-    };
-  }, []);
-
-
   return (
     <section
       style={{
@@ -53,18 +28,6 @@ export function Splash({ onEnter }: { onEnter: () => void }) {
     >
       <Logo variant="hero" size={288} basePath="/ds-assets/logo" />
 
-
-      {status?.nodeId ? (
-        <p
-          style={{
-            fontFamily: "var(--type-data-family)",
-            fontSize: "var(--text-2xs)",
-            color: "var(--text-secondary)",
-          }}
-        >
-          NODE {status.nodeId}
-        </p>
-      ) : null}
 
       <div
         style={{

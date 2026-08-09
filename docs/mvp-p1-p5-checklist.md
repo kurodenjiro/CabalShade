@@ -12,6 +12,12 @@ remain usable without a network connection; the chain is Solana devnet only.
 - [x] Retry attempts are bounded and persisted.
 - [x] Resume worker drains pending settlements after reconnect.
 - [x] UI distinguishes `WAITING` from `SETTLED`.
+- [x] Received `relay_tx` requests are submitted and reported back in Rust, so
+      relaying no longer depends on a screen being mounted (`src/relay.rs`).
+- [x] A peer's `relay_confirmed` report marks the local queue entry, which is
+      what lets the resume worker fire the release leg.
+- [x] Repeated mesh announcements are no longer suppressed by gossipsub's
+      content-hash message id.
 
 ## P2 — settlement
 
@@ -28,7 +34,27 @@ remain usable without a network connection; the chain is Solana devnet only.
 - [x] Intent form options come from Rust.
 - [x] Preview validates the same draft accepted by broadcast.
 - [x] Matcher checks asset, amount, and price constraints deterministically.
+- [x] Two opposite orders pair into one deal, priced at the midpoint of the
+      overlapping band (`IntentDraft::match_with`).
+- [x] The sell side settles; the buy side waits and verifies the announced
+      signature on-chain, so a symmetric match cannot pay twice.
+- [x] A cancelled order releases its counterparty back to the open book.
+- [x] Orders restored from disk are re-paired at bootstrap.
 - [ ] Multi-round agent negotiation remains disabled for MVP.
+
+See `docs/intent-matching-and-relay.md` for the full description and the
+manual test procedure.
+
+### Two-peer demo
+
+`scripts/demo-two-peers.sh` runs both sides on one Mac — separate data
+directories via `CABALMESH_DATA_DIR`, so each peer mints its own wallet — with
+one seeded order each (BUY under 96.00 against SELL above 94.00, clearing at
+95.00). Verified 2026-08-09: both peers mirrored each other's order over mDNS,
+matched at 9500 cents, the buy side parked in `WAITING`, and the sell side
+attempted the real devnet escrow. It failed with `Attempt to debit an account
+but found no record of a prior credit` because the sell wallet was empty —
+the settlement leg still needs `solana airdrop 1 <sell-wallet> --url devnet`.
 
 ## P4 — wallet and privacy
 

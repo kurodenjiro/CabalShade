@@ -36,6 +36,8 @@ pub const DEFAULT_MAGIC_ROUTER_URL: &str = "https://devnet-router.magicblock.app
 /// The deployed `cabal_escrow` Anchor program on devnet.
 pub const ESCROW_PROGRAM_ID: &str = "7ajNjyCeMYaPNDecgxDLt5NAJVoey39DKGhcjiVRQSuq";
 pub const BOOST_PROGRAM_ID: &str = "DVJ6GqkLAGwxceuMLJoKBKrfCposypoMCpBEHFea9GNa";
+/// Circle's official Solana devnet USDC mint (six decimals).
+pub const CIRCLE_USDC_DEVNET_MINT: &str = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
 const SPL_TOKEN_PROGRAM_ID: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 const ASSOCIATED_TOKEN_PROGRAM_ID: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL";
 
@@ -51,6 +53,15 @@ const IX_REFUND: [u8; 8] = [0x02, 0x60, 0xb7, 0xfb, 0x3f, 0xd0, 0x2e, 0x2e];
 
 fn anchor_discriminator(name: &str) -> [u8; 8] {
     solana_sdk::hash::hash(format!("global:{name}").as_bytes()).to_bytes()[..8]
+        .try_into().expect("hash has 32 bytes")
+}
+
+/// Anchor uses distinct discriminator namespaces for instructions and account
+/// data. `global:<name>` is valid only for instructions; account data starts
+/// with `account:<Type>`. Keeping this separate prevents an indexer from
+/// silently treating every real on-chain account as an unknown record.
+fn anchor_account_discriminator(name: &str) -> [u8; 8] {
+    solana_sdk::hash::hash(format!("account:{name}").as_bytes()).to_bytes()[..8]
         .try_into().expect("hash has 32 bytes")
 }
 
@@ -209,6 +220,21 @@ pub enum TxResult {
     },
 }
 
+/// What became of one submitted instruction.
+///
+/// [`TxResult`] is the frozen desktop shape and throws the signature away;
+/// this is the same outcome with the evidence kept. A settlement that cannot
+/// name its transaction cannot be checked against an explorer, and a
+/// counterparty has no reason to believe it.
+#[derive(Debug, Clone)]
+pub enum Submitted {
+    /// Confirmed on-chain, with its real transaction signature.
+    Confirmed { signature: String },
+    /// The RPC was unreachable, so it was signed offline and queued for a peer
+    /// with connectivity to relay.
+    Queued(QueuedTx),
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstantSession {
     pub session_id: String,
@@ -233,6 +259,18 @@ pub struct BlockchainBridge {
     /// Reserved for future MagicBlock Ephemeral Rollup delegation/commit/undelegate
     /// calls. Base-layer transactions now route through [`Self::rpc_url`].
     pub router_url: String,
+}
+
+/// What a depositor's escrow account currently holds, read straight from the
+/// chain rather than from a counterparty's claim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EscrowLock {
+    /// Who the locked funds are for.
+    pub payee: String,
+    /// How much is locked, in lamports.
+    pub lamports: u64,
+    /// Whether the escrow is still active (not yet released or refunded).
+    pub active: bool,
 }
 
 /// The two signatures of a settled deal: the escrow creation and the
@@ -429,6 +467,8 @@ impl BlockchainBridge {
     fn boost_program_id(&self) -> Pubkey { Pubkey::from_str(BOOST_PROGRAM_ID).expect("valid boost program id") }
 
     fn boost_pda(&self, mint: &Pubkey) -> Pubkey {
+        // The deployed devnet program uses the original `boost` seed. Keep
+        // this aligned with existing demo Boost accounts on-chain.
         Pubkey::find_program_address(&[b"boost", mint.as_ref()], &self.boost_program_id()).0
     }
 
@@ -440,6 +480,35 @@ impl BlockchainBridge {
         let token = Pubkey::from_str(SPL_TOKEN_PROGRAM_ID).expect("valid token program id");
         let associated = Pubkey::from_str(ASSOCIATED_TOKEN_PROGRAM_ID).expect("valid associated token program id");
         Pubkey::find_program_address(&[owner.as_ref(), token.as_ref(), mint.as_ref()], &associated).0
+    }
+
+    /// Native balance is stored in the encrypted snapshot; Circle USDC is an
+    /// SPL balance and must be read from its associated token account.
+    pub async fn circle_usdc_balance(&self) -> Result<u64, String> {
+        let owner = self.primary_keypair().map_err(|e| e.to_string())?.pubkey();
+        let mint = Pubkey::from_str(CIRCLE_USDC_DEVNET_MINT).map_err(|e| e.to_string())?;
+        let ata = Self::associated_token_address(&owner, &mint);
+        let account = self.rpc_client().get_account(&ata).await.map_err(|e| e.to_string())?;
+        if account.data.len() < 72 {
+            return Err("Circle USDC token account has invalid data".into());
+        }
+        Ok(u64::from_le_bytes(account.data[64..72].try_into().unwrap_or([0; 8])))
+    }
+
+    /// Transfers native SOL from this app's encrypted default wallet. Used by
+    /// the two-peer devnet harness to fund the upgrade authority without ever
+    /// exporting a private key.
+    pub async fn transfer_sol(&self, recipient: &str, amount_sol: &str) -> Result<String, Box<dyn Error>> {
+        let sender = self.primary_keypair()?;
+        let recipient = Pubkey::from_str(recipient)?;
+        let lamports = self.parse_sol(amount_sol)?;
+        let instruction = solana_sdk::system_instruction::transfer(&sender.pubkey(), &recipient, lamports);
+        let client = self.rpc_client();
+        let blockhash = client.get_latest_blockhash().await?;
+        let message = Message::new(std::slice::from_ref(&instruction), Some(&sender.pubkey()));
+        let mut transaction = Transaction::new_unsigned(message);
+        transaction.sign(&[&sender], blockhash);
+        Ok(client.send_and_confirm_transaction(&transaction).await?.to_string())
     }
 
     async fn send_boost_instruction(&self, instruction: Instruction, _summary: &str) -> Result<String, String> {
@@ -463,13 +532,15 @@ impl BlockchainBridge {
         let mint = Pubkey::from_str(mint_text).map_err(|e| e.to_string())?;
         let keypair = self.primary_keypair().map_err(|e| e.to_string())?;
         let token_program = Pubkey::from_str(SPL_TOKEN_PROGRAM_ID).map_err(|e| e.to_string())?;
-        let boost = self.boost_pda(&mint);
         let user_tokens = Self::associated_token_address(&keypair.pubkey(), &mint);
+        // Fresh claims have a one-to-one Boost PDA. Use the program rather
+        // than a raw SPL burn so burn, expiry and the consumed-boost record
+        // are one atomic on-chain action.
         let instruction = Instruction {
             program_id: self.boost_program_id(),
             accounts: vec![
-                solana_sdk::instruction::AccountMeta::new(boost, false),
-                solana_sdk::instruction::AccountMeta::new_readonly(mint, false),
+                solana_sdk::instruction::AccountMeta::new(self.boost_pda(&mint), false),
+                solana_sdk::instruction::AccountMeta::new(mint, false),
                 solana_sdk::instruction::AccountMeta::new(user_tokens, false),
                 solana_sdk::instruction::AccountMeta::new_readonly(keypair.pubkey(), true),
                 solana_sdk::instruction::AccountMeta::new_readonly(token_program, false),
@@ -494,7 +565,7 @@ impl BlockchainBridge {
             program_id: self.boost_program_id(),
             accounts: vec![
                 solana_sdk::instruction::AccountMeta::new(boost, false),
-                solana_sdk::instruction::AccountMeta::new_readonly(mint, false),
+                solana_sdk::instruction::AccountMeta::new(mint, false),
                 solana_sdk::instruction::AccountMeta::new(listing, false),
                 solana_sdk::instruction::AccountMeta::new(user_tokens, false),
                 solana_sdk::instruction::AccountMeta::new(vault_tokens, false),
@@ -537,8 +608,8 @@ impl BlockchainBridge {
         let client = self.rpc_client();
         let program = self.boost_program_id();
         let accounts = client.get_program_accounts(&program).await.map_err(|e| e.to_string())?;
-        let boost_disc = anchor_discriminator("account:Boost");
-        let listing_disc = anchor_discriminator("account:BoostListing");
+        let boost_disc = anchor_account_discriminator("Boost");
+        let listing_disc = anchor_account_discriminator("BoostListing");
         let mut boosts = Vec::new();
         let mut listings: std::collections::HashMap<Pubkey, (Pubkey, u64, i64)> = std::collections::HashMap::new();
         for (_address, account) in accounts {
@@ -578,6 +649,108 @@ impl BlockchainBridge {
             });
         }
         Ok(result)
+    }
+
+    pub async fn claim_demo_boost(&self, recipient_text: &str) -> Result<String, String> {
+        let recipient = Pubkey::from_str(recipient_text).map_err(|e| e.to_string())?;
+        let faucet = self.demo_faucet_keypair().map_err(|e| e.to_string())?;
+        // A boost is a real one-of-one SPL NFT. The old demo minted multiple
+        // copies of one mint, which made ownership, listing and "used" state
+        // indistinguishable across wallets. A fresh mint gives every claim an
+        // independent on-chain Boost PDA and an unambiguous burn lifecycle.
+        let mint_keypair = Keypair::new();
+        let mint = mint_keypair.pubkey();
+        let token_program = Pubkey::from_str(SPL_TOKEN_PROGRAM_ID).map_err(|e| e.to_string())?;
+        let associated_program = Pubkey::from_str(ASSOCIATED_TOKEN_PROGRAM_ID).map_err(|e| e.to_string())?;
+        let destination = Self::associated_token_address(&recipient, &mint);
+        let client = self.rpc_client();
+        let mint_rent = client
+            .get_minimum_balance_for_rent_exemption(82)
+            .await
+            .map_err(|e| e.to_string())?;
+        let create_mint = solana_sdk::system_instruction::create_account(
+            &faucet.pubkey(),
+            &mint,
+            mint_rent,
+            82,
+            &token_program,
+        );
+        // SPL Token's InitializeMint instruction: discriminant 0, 0 decimals,
+        // faucet mint authority, and no freeze authority. Keeping this local
+        // avoids a second token SDK whose version could drift from Solana 2.x.
+        let mut initialize_mint_data = vec![0u8, 0u8];
+        initialize_mint_data.extend_from_slice(faucet.pubkey().as_ref());
+        initialize_mint_data.extend_from_slice(&0u32.to_le_bytes());
+        let initialize_mint = Instruction {
+            program_id: token_program,
+            accounts: vec![
+                solana_sdk::instruction::AccountMeta::new(mint, false),
+                solana_sdk::instruction::AccountMeta::new_readonly(solana_sdk::sysvar::rent::ID, false),
+            ],
+            data: initialize_mint_data,
+        };
+        let create_ata = Instruction {
+            program_id: associated_program,
+            accounts: vec![
+                solana_sdk::instruction::AccountMeta::new(faucet.pubkey(), true),
+                solana_sdk::instruction::AccountMeta::new(destination, false),
+                solana_sdk::instruction::AccountMeta::new_readonly(recipient, false),
+                solana_sdk::instruction::AccountMeta::new_readonly(mint, false),
+                solana_sdk::instruction::AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
+                solana_sdk::instruction::AccountMeta::new_readonly(token_program, false),
+                solana_sdk::instruction::AccountMeta::new_readonly(solana_sdk::sysvar::rent::ID, false),
+            ],
+            data: vec![1], // CreateIdempotent
+        };
+        let mut mint_to_data = vec![7u8]; // SPL Token MintTo
+        mint_to_data.extend_from_slice(&1u64.to_le_bytes());
+        let mint_to = Instruction {
+            program_id: token_program,
+            accounts: vec![
+                solana_sdk::instruction::AccountMeta::new(mint, false),
+                solana_sdk::instruction::AccountMeta::new(destination, false),
+                solana_sdk::instruction::AccountMeta::new_readonly(faucet.pubkey(), true),
+            ],
+            data: mint_to_data,
+        };
+        let expires_at = Utc::now().timestamp() + 24 * 60 * 60;
+        let boost = self.boost_pda(&mint);
+        let mut register_data = anchor_discriminator("register_boost").to_vec();
+        register_data.extend_from_slice(&250u16.to_le_bytes());
+        register_data.extend_from_slice(&expires_at.to_le_bytes());
+        let register_boost = Instruction {
+            program_id: self.boost_program_id(),
+            accounts: vec![
+                solana_sdk::instruction::AccountMeta::new(boost, false),
+                solana_sdk::instruction::AccountMeta::new_readonly(mint, false),
+                solana_sdk::instruction::AccountMeta::new(faucet.pubkey(), true),
+                solana_sdk::instruction::AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
+            ],
+            data: register_data,
+        };
+        let blockhash = client.get_latest_blockhash().await.map_err(|e| e.to_string())?;
+        let message = Message::new(
+            &[create_mint, initialize_mint, create_ata, mint_to, register_boost],
+            Some(&faucet.pubkey()),
+        );
+        let mut tx = Transaction::new_unsigned(message);
+        tx.sign(&[&faucet, &mint_keypair], blockhash);
+        client
+            .send_and_confirm_transaction(&tx)
+            .await
+            .map(|_| mint.to_string())
+            .map_err(|e| e.to_string())
+    }
+
+    fn demo_faucet_keypair(&self) -> Result<Keypair, Box<dyn Error>> {
+        let configured = std::env::var("BOOST_FAUCET_KEYPAIR")
+            .unwrap_or_else(|_| "~/.config/solana/id.json".to_string());
+        let path = if configured.starts_with("~/") {
+            std::env::var("HOME").map(|home| PathBuf::from(home).join(&configured[2..]))?
+        } else { PathBuf::from(configured) };
+        let bytes: Vec<u8> = serde_json::from_str(&fs::read_to_string(path)?)?;
+        let arr: [u8; 64] = bytes.try_into().map_err(|_| "invalid faucet keypair")?;
+        Ok(Keypair::try_from(&arr[..])?)
     }
 
     // ---- Offline signing + mesh-relay queue -------------------------------
@@ -897,10 +1070,11 @@ impl BlockchainBridge {
 
     // ---- Escrow (Solana Anchor program) -----------------------------------
 
-    /// The escrow PDA for a depositor: `[ESCROW_SEED, depositor]`.
+    /// The currently deployed escrow PDA for a depositor. This switches to V2
+    /// together with the on-chain upgrade, never ahead of it.
     fn escrow_pda(&self, depositor: &Pubkey) -> (Pubkey, u8) {
         Pubkey::find_program_address(
-            &[b"cabal-escrow", depositor.as_ref()],
+            &[b"cabal-escrow-v2", depositor.as_ref()],
             &Pubkey::from_str(ESCROW_PROGRAM_ID).expect("valid program id"),
         )
     }
@@ -927,17 +1101,71 @@ impl BlockchainBridge {
         Ok(whole.saturating_mul(LAMPORTS_PER_SOL) + frac)
     }
 
-    /// Creates an on-chain escrow deal, locking `amount_sol` for `payee`.
-    /// If the RPC can't be reached, falls back to signing offline and queueing
-    /// for mesh relay.
-    #[tracing::instrument(skip(self), fields(payee = %payee, expiry = expiry_unix))]
-    pub async fn create_escrow(&self, payee: &str, amount_sol: &str, expiry_unix: u64) -> Result<TxResult, Box<dyn Error>> {
+    /// Submits one instruction, or signs it offline when the RPC is out of
+    /// reach. The single place the online/offline split is decided, so every
+    /// escrow leg reports its outcome the same way.
+    async fn submit(&self, instruction: Instruction, summary: &str) -> Result<Submitted, Box<dyn Error>> {
         let keypair = self.primary_keypair()?;
+
+        let online_result = timeout(Duration::from_secs(20), async {
+            let client = self.rpc_client();
+            let blockhash = client.get_latest_blockhash().await.map_err(|e| e.to_string())?;
+            let message = Message::new(std::slice::from_ref(&instruction), Some(&keypair.pubkey()));
+            let mut tx = Transaction::new_unsigned(message);
+            tx.sign(&[&keypair], blockhash);
+            let signature = client.send_and_confirm_transaction(&tx).await.map_err(|e| e.to_string())?;
+            Ok::<Signature, String>(signature)
+        })
+        .await;
+
+        match online_result {
+            Ok(Ok(signature)) => {
+                tracing::info!(%summary, %signature, "✅ [Bridge] transaction confirmed");
+                Ok(Submitted::Confirmed { signature: signature.to_string() })
+            }
+            Ok(Err(e)) => Err(e.into()),
+            Err(_timed_out) => {
+                tracing::warn!(%summary, "⚠️  [Bridge] RPC unreachable — signing offline for mesh relay.");
+                Ok(Submitted::Queued(self.sign_offline(instruction, summary).await?))
+            }
+        }
+    }
+
+    /// Whether the network has this transaction signature.
+    ///
+    /// A counterparty announcing "I settled, here is the signature" is a claim,
+    /// not a settlement. This is how the other side checks it before writing
+    /// the trade into its own ledger. `false` when the RPC cannot be reached —
+    /// unverified is never treated as verified.
+    pub async fn signature_confirmed(&self, signature: &str) -> bool {
+        let Ok(parsed) = Signature::from_str(signature) else {
+            return false;
+        };
+        let lookup = timeout(Duration::from_secs(15), async {
+            self.rpc_client().get_signature_statuses(&[parsed]).await
+        })
+        .await;
+        match lookup {
+            Ok(Ok(response)) => response
+                .value
+                .first()
+                .and_then(Option::as_ref)
+                .is_some_and(|status| status.err.is_none()),
+            _ => false,
+        }
+    }
+
+    /// The instruction that locks `amount_sol` for `payee`.
+    fn create_escrow_instruction(
+        &self,
+        depositor: &Pubkey,
+        payee: &str,
+        amount_sol: &str,
+        expiry_unix: u64,
+    ) -> Result<Instruction, Box<dyn Error>> {
         let payee_pubkey = Pubkey::from_str(payee)?;
         let amount = self.parse_sol(amount_sol)?;
-
-        let (escrow_pda, _bump) = self.escrow_pda(&keypair.pubkey());
-        let program_id = self.escrow_program_id();
+        let (escrow_pda, _bump) = self.escrow_pda(depositor);
 
         // Build instruction data: discriminator + payee + amount + expiry.
         let mut data = Vec::with_capacity(8 + 32 + 8 + 8);
@@ -946,41 +1174,48 @@ impl BlockchainBridge {
         data.extend_from_slice(&amount.to_le_bytes());
         data.extend_from_slice(&expiry_unix.to_le_bytes());
 
-        let instruction = Instruction {
-            program_id,
+        Ok(Instruction {
+            program_id: self.escrow_program_id(),
             accounts: vec![
                 solana_sdk::instruction::AccountMeta::new(escrow_pda, false),
-                solana_sdk::instruction::AccountMeta::new(keypair.pubkey(), true),
+                solana_sdk::instruction::AccountMeta::new(*depositor, true),
                 solana_sdk::instruction::AccountMeta::new_readonly(
                     solana_sdk::system_program::ID,
                     false,
                 ),
             ],
             data,
-        };
+        })
+    }
 
-        let online_result = timeout(Duration::from_secs(6), async {
-            let client = self.rpc_client();
-            let blockhash = client.get_latest_blockhash().await.map_err(|e| e.to_string())?;
-            let message = Message::new(std::slice::from_ref(&instruction), Some(&keypair.pubkey()));
-            let mut tx = Transaction::new_unsigned(message);
-            tx.sign(&[&keypair], blockhash);
-            let signature = client.send_transaction(&tx).await.map_err(|e| e.to_string())?;
-            Ok::<Signature, String>(signature)
-        }).await;
+    /// Creates an on-chain escrow deal, keeping the real signature.
+    pub async fn create_escrow_signed(
+        &self,
+        payee: &str,
+        amount_sol: &str,
+        expiry_unix: u64,
+    ) -> Result<Submitted, Box<dyn Error>> {
+        let depositor = self.primary_keypair()?.pubkey();
+        let instruction = self.create_escrow_instruction(&depositor, payee, amount_sol, expiry_unix)?;
+        self.submit(instruction, "Create escrow").await
+    }
 
-        match online_result {
-            Ok(Ok(signature)) => {
-                tracing::info!("✅ [Bridge] Escrow created. Tx: {}", signature);
-                Ok(TxResult::Confirmed { id: 1 })
-            }
-            Ok(Err(e)) => Err(e.into()),
-            Err(_timed_out) => {
-                tracing::warn!("⚠️  [Bridge] RPC unreachable — signing create_escrow offline for mesh relay.");
-                let queued = self.sign_offline(instruction, "Create escrow").await?;
-                Ok(TxResult::Queued { queue_id: queued.id })
-            }
-        }
+    /// Releases the caller's escrow to its payee, keeping the real signature.
+    pub async fn release_escrow_signed(&self) -> Result<Submitted, Box<dyn Error>> {
+        let caller = self.primary_keypair()?.pubkey();
+        let instruction = self.release_instruction(&caller).await?;
+        self.submit(instruction, "Release escrow").await
+    }
+
+    /// Creates an on-chain escrow deal, locking `amount_sol` for `payee`.
+    /// If the RPC can't be reached, falls back to signing offline and queueing
+    /// for mesh relay.
+    #[tracing::instrument(skip(self), fields(payee = %payee, expiry = expiry_unix))]
+    pub async fn create_escrow(&self, payee: &str, amount_sol: &str, expiry_unix: u64) -> Result<TxResult, Box<dyn Error>> {
+        Ok(match self.create_escrow_signed(payee, amount_sol, expiry_unix).await? {
+            Submitted::Confirmed { .. } => TxResult::Confirmed { id: 1 },
+            Submitted::Queued(queued) => TxResult::Queued { queue_id: queued.id },
+        })
     }
 
     /// Reads the payee stored in an escrow PDA. The escrow account data layout
@@ -995,6 +1230,41 @@ impl BlockchainBridge {
         }
         let bytes: [u8; 32] = data[40..72].try_into()?;
         Ok(Pubkey::new_from_array(bytes))
+    }
+
+    /// Reads a depositor's escrow account, if it currently holds one.
+    ///
+    /// The PDA is derived from the depositor alone, so a buyer that knows its
+    /// counterparty's wallet can check for itself that funds are locked in its
+    /// name — without asking, and without taking the counterparty's word for
+    /// it. `None` covers both "no escrow" and "cannot reach the chain": an
+    /// unanswered question is never reported as a lock.
+    pub async fn escrow_lock_for(&self, depositor: &str) -> Option<EscrowLock> {
+        let depositor = Pubkey::from_str(depositor).ok()?;
+        let (escrow_pda, _bump) = self.escrow_pda(&depositor);
+        let account = timeout(
+            Duration::from_secs(10),
+            self.rpc_client().get_account(&escrow_pda),
+        )
+        .await
+        .ok()?
+        .ok()?;
+
+        // Anchor discriminator (8) + depositor (32) + payee (32) + amount (8)
+        // + expiry (8) + status (1).
+        let data = account.data;
+        if data.len() < 89 {
+            return None;
+        }
+        let payee: [u8; 32] = data[40..72].try_into().ok()?;
+        let lamports = u64::from_le_bytes(data[72..80].try_into().ok()?);
+        Some(EscrowLock {
+            payee: Pubkey::new_from_array(payee).to_string(),
+            lamports,
+            // 0 = active, 1 = released, 2 = refunded. A released escrow is
+            // closed by the program, so in practice only 0 is ever seen here.
+            active: data[88] == 0,
+        })
     }
 
     /// Builds a release instruction for the depositor's escrow PDA, fetching
@@ -1040,31 +1310,10 @@ impl BlockchainBridge {
     }
 
     pub async fn release_escrow(&self, _escrow_id: u64) -> Result<TxResult, Box<dyn Error>> {
-        let keypair = self.primary_keypair()?;
-        let instruction = self.release_instruction(&keypair.pubkey()).await?;
-
-        let online_result = timeout(Duration::from_secs(6), async {
-            let client = self.rpc_client();
-            let blockhash = client.get_latest_blockhash().await.map_err(|e| e.to_string())?;
-            let message = Message::new(std::slice::from_ref(&instruction), Some(&keypair.pubkey()));
-            let mut tx = Transaction::new_unsigned(message);
-            tx.sign(&[&keypair], blockhash);
-            let signature = client.send_transaction(&tx).await.map_err(|e| e.to_string())?;
-            Ok::<Signature, String>(signature)
-        }).await;
-
-        match online_result {
-            Ok(Ok(signature)) => {
-                tracing::info!("✅ [Bridge] Escrow released. Tx: {}", signature);
-                Ok(TxResult::Confirmed { id: 1 })
-            }
-            Ok(Err(e)) => Err(e.into()),
-            Err(_timed_out) => {
-                tracing::warn!("⚠️  [Bridge] RPC unreachable — signing release_escrow offline for mesh relay.");
-                let queued = self.sign_offline(instruction, "Release escrow").await?;
-                Ok(TxResult::Queued { queue_id: queued.id })
-            }
-        }
+        Ok(match self.release_escrow_signed().await? {
+            Submitted::Confirmed { .. } => TxResult::Confirmed { id: 1 },
+            Submitted::Queued(queued) => TxResult::Queued { queue_id: queued.id },
+        })
     }
 
     /// Runs the real settlement path: create an escrow to `payee`, then
@@ -1083,42 +1332,53 @@ impl BlockchainBridge {
         // whatever was queued so the caller can broadcast it to peers.
         let mut queued_for_relay: Vec<QueuedTx> = Vec::new();
 
-        let created = self.create_escrow(payee, amount_sol, 0).await?;
+        // The deployed MVP program derives one escrow PDA per depositor. If a
+        // previous demo left that PDA open, close it through the real release
+        // instruction before initializing the next intent; otherwise Anchor
+        // rejects the initialize with `account ... already in use`.
+        let depositor = self.primary_keypair()?.pubkey();
+        let (existing_pda, _) = self.escrow_pda(&depositor);
+        if self.rpc_client().get_account(&existing_pda).await.is_ok() {
+            match self.release_escrow_signed().await? {
+                Submitted::Confirmed { .. } => {}
+                Submitted::Queued(queued) => {
+                    let queue_id = queued.id.clone();
+                    queued_for_relay.push(queued);
+                    // Do not initialize another deal while the prior PDA is
+                    // live. That produces a deterministic "already in use"
+                    // simulation failure and hides the real relay state.
+                    return Ok(SettledEscrow {
+                        create_tx: "previous escrow release queued".into(),
+                        release_tx: queue_id,
+                        queued_for_relay,
+                    });
+                }
+            }
+        }
+
+        let created = self.create_escrow_signed(payee, amount_sol, 0).await?;
         let create_tx = match &created {
-            TxResult::Confirmed { id } => format!("escrow-{id}"),
-            TxResult::Queued { queue_id } => {
+            Submitted::Confirmed { signature } => signature.clone(),
+            Submitted::Queued(queued) => {
                 // The release leg cannot run until the create is on-chain, so a
                 // queued create parks the deal; the caller relays it and the
                 // release can follow once it confirms.
-                if let Some(tx) = self
-                    .load_pending_relay_txs()
-                    .into_iter()
-                    .find(|tx| &tx.id == queue_id)
-                {
-                    queued_for_relay.push(tx);
-                }
-                queue_id.clone()
+                queued_for_relay.push(queued.clone());
+                queued.id.clone()
             }
         };
 
         let release_tx = match created {
-            TxResult::Confirmed { .. } => {
-                match self.release_escrow(0).await? {
-                    TxResult::Confirmed { id } => format!("escrow-{id}"),
-                    TxResult::Queued { queue_id } => {
-                        if let Some(tx) = self
-                            .load_pending_relay_txs()
-                            .into_iter()
-                            .find(|tx| tx.id == queue_id)
-                        {
-                            queued_for_relay.push(tx);
-                        }
-                        queue_id
-                    }
+            Submitted::Confirmed { .. } => match self.release_escrow_signed().await? {
+                Submitted::Confirmed { signature } => signature,
+                Submitted::Queued(queued) => {
+                    let queue_id = queued.id.clone();
+                    queued_for_relay.push(queued);
+                    queue_id
                 }
-            }
+            },
             // Create was queued; the release hasn't been signed yet.
-            TxResult::Queued { .. } => "queued-for-relay".to_string(),
+            Submitted::Queued(_) => "queued-for-relay".to_string(),
         };
 
         Ok(SettledEscrow {
@@ -1135,31 +1395,12 @@ impl BlockchainBridge {
     /// The escrow PDA is derived from the depositor, so `escrow_id` is
     /// informational — the refund targets the depositor's own escrow account.
     pub async fn refund_escrow(&self, _escrow_id: u64) -> Result<TxResult, Box<dyn Error>> {
-        let keypair = self.primary_keypair()?;
-        let instruction = self.refund_instruction(&keypair.pubkey());
-
-        let online_result = timeout(Duration::from_secs(6), async {
-            let client = self.rpc_client();
-            let blockhash = client.get_latest_blockhash().await.map_err(|e| e.to_string())?;
-            let message = Message::new(std::slice::from_ref(&instruction), Some(&keypair.pubkey()));
-            let mut tx = Transaction::new_unsigned(message);
-            tx.sign(&[&keypair], blockhash);
-            let signature = client.send_transaction(&tx).await.map_err(|e| e.to_string())?;
-            Ok::<Signature, String>(signature)
-        }).await;
-
-        match online_result {
-            Ok(Ok(signature)) => {
-                tracing::info!("✅ [Bridge] Escrow refunded. Tx: {}", signature);
-                Ok(TxResult::Confirmed { id: 1 })
-            }
-            Ok(Err(e)) => Err(e.into()),
-            Err(_timed_out) => {
-                tracing::warn!("⚠️  [Bridge] RPC unreachable — signing refund_escrow offline for mesh relay.");
-                let queued = self.sign_offline(instruction, "Refund escrow").await?;
-                Ok(TxResult::Queued { queue_id: queued.id })
-            }
-        }
+        let caller = self.primary_keypair()?.pubkey();
+        let instruction = self.refund_instruction(&caller);
+        Ok(match self.submit(instruction, "Refund escrow").await? {
+            Submitted::Confirmed { .. } => TxResult::Confirmed { id: 1 },
+            Submitted::Queued(queued) => TxResult::Queued { queue_id: queued.id },
+        })
     }
 
     /// Fires the release leg for any escrow whose create transaction has
@@ -1179,35 +1420,29 @@ impl BlockchainBridge {
 
         for tx in &mut pending {
             if tx.status == "confirmed" && tx.summary == "Create escrow" {
-                match self.release_escrow(0).await {
-                    Ok(TxResult::Confirmed { id }) => {
-                        tracing::info!(id = %tx.id, "resumed settlement: create confirmed, release submitted");
+                match self.release_escrow_signed().await {
+                    Ok(Submitted::Confirmed { signature }) => {
+                        tracing::info!(id = %tx.id, %signature, "resumed settlement: create confirmed, release submitted");
                         tx.status = "completed".to_string();
                         tx.summary = "Create escrow (released)".to_string();
                         changed = true;
                         released.push(QueuedTx {
-                            id: format!("escrow-{id}"),
+                            id: signature.clone(),
                             raw_tx_hex: String::new(),
                             summary: "Release escrow".into(),
                             created_at: tx.created_at,
                             status: "confirmed".into(),
-                            tx_hash: Some(format!("escrow-{id}")),
+                            tx_hash: Some(signature),
                             reason: None,
                             attempts: 0,
                         });
                     }
-                    Ok(TxResult::Queued { queue_id }) => {
+                    Ok(Submitted::Queued(queued)) => {
                         tracing::info!(id = %tx.id, "resumed settlement: release signed offline, queued for relay");
                         tx.status = "completed".to_string();
                         tx.summary = "Create escrow (release queued)".to_string();
                         changed = true;
-                        if let Some(queued) = self
-                            .load_pending_relay_txs()
-                            .into_iter()
-                            .find(|q| q.id == queue_id)
-                        {
-                            released.push(queued);
-                        }
+                        released.push(queued);
                     }
                     Err(error) => {
                         tracing::warn!(id = %tx.id, %error, "resume settlement failed");

@@ -41,6 +41,12 @@ const COMMANDS: &[&str] = &[
     "copy_mnemonic",
     "import_mnemonic",
     "suggest_mnemonic_word",
+    // SPL boost NFT marketplace
+    "get_boost_nfts",
+    "claim_demo_boost",
+    "use_boost_nft",
+    "list_boost_nft",
+    "buy_boost_nft",
     // mesh
     "send_intent_to_mesh",
     "get_relay_stats",

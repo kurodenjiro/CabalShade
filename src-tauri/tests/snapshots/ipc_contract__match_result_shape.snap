@@ -2,11 +2,8 @@
 source: tests/ipc_contract.rs
 ---
 {
-  "listing_id": 7,
-  "seller": "0xfF8dd6dbB7B97b44044573cFE843dE1F463637a9",
+  "seller": "GyzdBSo87y5vT4oyoBCAdeT7hSz4C2ihj89QrVGCpdRa",
   "description": "AI compute credit",
-  "price_avax": "0.05",
-  "price_wei": "50000000000000000",
-  "token_id": 42,
+  "price_sol": "0.05",
   "reason": "matches intent and is under the ceiling"
 }

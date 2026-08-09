@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
-import type { ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Button, Panel, StatusDot } from "../ds";
+import { Panel, StatusDot } from "../ds";
 import type { NodeSummary } from "../types/bindings";
 
 /**
@@ -19,7 +18,6 @@ import type { NodeSummary } from "../types/bindings";
 export function Nodes() {
   const [nodes, setNodes] = useState<NodeSummary[] | null>(null);
   const [denied, setDenied] = useState(false);
-  const [retryToken, setRetryToken] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -42,7 +40,7 @@ export function Nodes() {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [retryToken]);
+  }, []);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-6)", padding: "var(--space-6)" }}>
@@ -84,7 +82,6 @@ export function Nodes() {
           <Empty
             title="DISCOVERY UNAVAILABLE"
             body="Local network access is not granted. No peers can be found on this network."
-            action={<Button tone="secondary" size="sm" className="cm-touch" onClick={() => { setDenied(false); setNodes(null); setRetryToken((value) => value + 1); }}>RETRY DISCOVERY</Button>}
           />
         ) : nodes === null ? (
           <Empty title="SCANNING" body="Looking for nodes." />
@@ -156,7 +153,7 @@ function NodeRow({ node }: { node: NodeSummary }) {
   );
 }
 
-function Empty({ title, body, action }: { title: string; body: string; action?: ReactNode }) {
+function Empty({ title, body }: { title: string; body: string }) {
   return (
     <div
       style={{
@@ -196,7 +193,6 @@ function Empty({ title, body, action }: { title: string; body: string; action?: 
         {title}
       </span>
       <span style={{ fontSize: "var(--text-base)", color: "var(--text-muted)" }}>{body}</span>
-      {action}
     </div>
   );
 }

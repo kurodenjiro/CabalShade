@@ -502,6 +502,13 @@ impl MeshNetwork {
                             MeshBehaviourEvent::Mdns(mdns::Event::Discovered(list)) => {
                                 for (peer_id, multiaddr) in list {
                                     tracing::info!(peer_id = %peer_id, address = %multiaddr, "peer discovered");
+                                    // Discovery only tells gossipsub about a peer; it does not
+                                    // establish a transport connection. Without this dial, two
+                                    // desktop instances on the same LAN remain at zero peers and
+                                    // broadcasts can never be delivered.
+                                    if let Err(error) = self.swarm.dial(multiaddr.clone()) {
+                                        tracing::warn!(peer_id = %peer_id, %error, "could not dial discovered peer");
+                                    }
                                     self.swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
                                     let _ = tx.send(MeshEvent::PeerDiscovered {
                                         peer_id: peer_id.to_string(),
@@ -556,13 +563,6 @@ impl MeshNetwork {
                                             let tx_hash = payload.get("tx_hash").and_then(|v| v.as_str()).map(|s| s.to_string());
                                             tracing::info!("📨 Received relay_confirmed: {} -> {}", queue_id, status);
                                             let _ = tx.send(MeshEvent::RelayConfirmed { queue_id, status, tx_hash });
-                                        }
-                                    } else if intent.intent_type == "intent_decision" {
-                                        if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&intent.payload) {
-                                            let intent_id = payload.get("intent_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                                            let decision = payload.get("decision").and_then(|v| v.as_str()).unwrap_or("NEEDS_REVIEW").to_string();
-                                            let reason = payload.get("reason").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                                            let _ = tx.send(MeshEvent::IntentDecisionReceived { intent_id, decision, reason });
                                         }
                                     } else if intent.intent_type == "content_request" {
                                         // A buyer is asking whoever sold this tokenId to deliver the content.
@@ -635,7 +635,18 @@ impl MeshNetwork {
             return Err("Integrity check failed: Malformed relay path".into());
         }
 
-        let payload = serde_json::to_vec(&intent)?;
+        // Stamped so that re-announcing the same thing actually leaves the
+        // node. The message id above is a hash of the payload, so a byte-identical
+        // second publish is discarded as a duplicate — which is right for
+        // gossip forwarding and wrong for every deliberate repeat this app
+        // makes: re-offering an open order to a peer that has just appeared,
+        // re-announcing a settlement to a counterparty that was away, asking
+        // again whether a trade settled. Receivers ignore the field.
+        let mut payload = serde_json::to_value(&intent)?;
+        if let Some(envelope) = payload.as_object_mut() {
+            envelope.insert("nonce".into(), serde_json::json!(Self::next_nonce()));
+        }
+        let payload = serde_json::to_vec(&payload)?;
         match self.swarm
             .behaviour_mut()
             .gossipsub
@@ -671,6 +682,19 @@ impl MeshNetwork {
             Err(e) => Err(Box::new(e))
         }
     }
+    /// A value no other publish from this process will reuse. Wall-clock
+    /// milliseconds alone would collide for two publishes in the same
+    /// millisecond — which is exactly what re-announcing a batch of orders
+    /// does — so a counter is mixed in.
+    fn next_nonce() -> u64 {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as u64);
+        millis.wrapping_mul(1_000) + COUNTER.fetch_add(1, Ordering::Relaxed) % 1_000
+    }
+
     pub fn verify_relay_integrity(intent: &PrivacyIntent) -> bool {
         // Basic integrity check:
         // 1. Relay path should not be empty (should contain at least sender)
@@ -703,7 +727,6 @@ pub enum MeshEvent {
     SettlementComplete { details: String },
     RelayTxReceived { queue_id: String, raw_tx_hex: String, summary: String },
     RelayConfirmed { queue_id: String, status: String, tx_hash: Option<String> },
-    IntentDecisionReceived { intent_id: String, decision: String, reason: String },
     ContentRequested { token_id: u64 },
     ContentDelivered { token_id: u64, text: String, signature: String, signer_address: String },
     /// A peer's real Solana wallet address, learned from its "presence" broadcast

@@ -38,7 +38,10 @@ pub mod cabal_boost {
 
     pub fn list_boost(ctx: Context<ListBoost>, price_lamports: u64) -> Result<()> {
         require!(price_lamports > 0, BoostError::InvalidPrice);
-        require!(ctx.accounts.user_tokens.amount == 1, BoostError::MissingBoostNft);
+        // A wallet may hold multiple copies of the zero-decimal demo boost.
+        // Listing transfers exactly one, so require at least one rather than
+        // rejecting the whole account when its balance is greater than one.
+        require!(ctx.accounts.user_tokens.amount >= 1, BoostError::MissingBoostNft);
         token::transfer(CpiContext::new(ctx.accounts.token_program.to_account_info(), Transfer {
             from: ctx.accounts.user_tokens.to_account_info(), to: ctx.accounts.vault_tokens.to_account_info(), authority: ctx.accounts.seller.to_account_info(),
         }), 1)?;

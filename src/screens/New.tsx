@@ -8,20 +8,20 @@ import type { IntentId } from "../shell/screen";
  * The compose screen.
  *
  * Every option comes from `intent_form_options` — Rust is the single source of
- * the modes, assets, conditions and privacy levels, so the form cannot drift
+ * the modes, assets and conditions, so the form cannot drift
  * from what `broadcast_intent` will accept. Validation happens on submit via
  * `preview_intent`, which validates the draft and returns exactly what the
  * confirm dialog shows.
  */
-export function New({ onBroadcast }: { onBroadcast: (id: IntentId) => void }) {
+export function New({ onBroadcast, onOpenMarketplace }: { onBroadcast: (id: IntentId) => void; onOpenMarketplace: () => void }) {
   const [options, setOptions] = useState<FormOptions | null>(null);
   const [action, setAction] = useState("BUY");
+  const [sellTarget, setSellTarget] = useState<"SOL" | "NFT">("SOL");
   const [asset, setAsset] = useState("SOL");
   const [condition, setCondition] = useState("Price under");
   const [price, setPrice] = useState("");
   const [amount, setAmount] = useState("");
   const [mode, setMode] = useState("SHARK MODE");
-  const [privacy, setPrivacy] = useState("MEDIUM");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -45,6 +45,10 @@ export function New({ onBroadcast }: { onBroadcast: (id: IntentId) => void }) {
 
   const confirm = async () => {
     if (busy) return;
+    if (action === "SELL" && sellTarget === "NFT") {
+      onOpenMarketplace();
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -57,7 +61,9 @@ export function New({ onBroadcast }: { onBroadcast: (id: IntentId) => void }) {
             : { kind: condition.includes("above") ? "above" : "under", price },
           amount,
           mode: mode.replace(" MODE", ""),
-          privacy,
+          // Privacy routing is not implemented yet; keep the wire format
+          // compatible while hiding the non-functional control from users.
+          privacy: "MEDIUM",
         },
       });
       onBroadcast(id);
@@ -78,6 +84,18 @@ export function New({ onBroadcast }: { onBroadcast: (id: IntentId) => void }) {
         selected={action}
         onSelect={setAction}
       />
+
+      {action === "SELL" && (
+        <Field label="SELL TYPE">
+          <div style={{ display: "flex", gap: "var(--space-3)" }}>
+            <Pill selected={sellTarget === "SOL"} onClick={() => { setSellTarget("SOL"); setAsset("SOL"); }}>SELL SOL</Pill>
+            <Pill selected={sellTarget === "NFT"} onClick={() => setSellTarget("NFT")}>SELL NFT</Pill>
+          </div>
+          <span style={{ color: "var(--text-muted)", fontSize: "var(--text-2xs)" }}>
+            {sellTarget === "SOL" ? "Broadcast a SOL sell intent through the mesh." : "Open the SPL boost NFT marketplace to list an item."}
+          </span>
+        </Field>
+      )}
 
       {/* ASSET */}
       <Field label="ASSET">
@@ -103,7 +121,7 @@ export function New({ onBroadcast }: { onBroadcast: (id: IntentId) => void }) {
           <input
             className="cm-input cm-touch"
             inputMode="decimal"
-            placeholder="Price (USD)"
+            placeholder="Price (USDC)"
             value={price}
             onChange={(e) => setPrice(e.target.value)}
             style={{ marginTop: "var(--space-4)", width: "100%" }}
@@ -134,17 +152,6 @@ export function New({ onBroadcast }: { onBroadcast: (id: IntentId) => void }) {
         </div>
       </Field>
 
-      {/* PRIVACY */}
-      <Field label="PRIVACY">
-        <div style={{ display: "flex", gap: "var(--space-3)", flexWrap: "wrap" }}>
-          {options.privacyLevels.map((p) => (
-            <Pill key={p} selected={privacy === p} onClick={() => setPrivacy(p)}>
-              {p}
-            </Pill>
-          ))}
-        </div>
-      </Field>
-
       {error && (
         <Panel>
           <div style={{ color: "var(--text-alert)", fontSize: "var(--text-base)", padding: "var(--space-4)" }}>
@@ -154,7 +161,7 @@ export function New({ onBroadcast }: { onBroadcast: (id: IntentId) => void }) {
       )}
 
       <Button tone="primary" size="lg" block className="cm-touch" disabled={busy} onClick={confirm}>
-        {busy ? "BROADCASTING..." : "BROADCAST INTENT"}
+        {busy ? "BROADCASTING..." : action === "SELL" && sellTarget === "NFT" ? "OPEN NFT MARKETPLACE" : action === "SELL" ? "BROADCAST SELL SOL" : "BROADCAST BUY INTENT"}
       </Button>
     </div>
   );

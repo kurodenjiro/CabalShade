@@ -27,13 +27,6 @@ pub struct ContentAnalysis {
     pub reasoning: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IntentDecision {
-    pub decision: String,
-    pub confidence: f32,
-    pub reason: String,
-}
-
 pub struct SharkAgent {
     client: Client,
     ollama_url: Option<String>,
@@ -72,7 +65,7 @@ Respond ONLY with JSON in this exact format:
 }"#.to_string();
 
         let request = OllamaRequest {
-            model: "llama2".to_string(),
+            model: "qwen2.5:0.5b".to_string(),
             prompt: format!("Classify this page 1 text:\n\n{}", text),
             stream: false,
             system: Some(system_prompt),
@@ -103,34 +96,6 @@ Respond ONLY with JSON in this exact format:
             is_real_document: parsed["is_real_document"].as_bool().unwrap_or(false),
             reasoning: parsed["reasoning"].as_str().unwrap_or("").to_string(),
         })
-    }
-
-    /// Evaluates a received off-chain intent locally. The model may only
-    /// recommend; callers still enforce protocol and payment rules.
-    pub async fn analyze_intent(&self, intent_json: &str) -> Result<IntentDecision, Box<dyn Error>> {
-        let system_prompt = r#"You are the local policy agent for Cabal Mesh.
-Evaluate the received private intent against a neutral peer's ability to fulfil it.
-Never invent balances, listings, identities, or prices. If the request is unclear,
-choose NEEDS_REVIEW. Respond ONLY as JSON:
-{"decision":"ACCEPT|REJECT|NEEDS_REVIEW","confidence":0.0,"reason":"one short sentence"}"#;
-        let request = OllamaRequest {
-            model: "llama2".to_string(),
-            prompt: format!("Received intent JSON:\n{}", intent_json),
-            stream: false,
-            system: Some(system_prompt.to_string()),
-        };
-        let response = self.client.post(format!("{}/api/generate", self.url())).json(&request).send().await?;
-        let ollama_response: OllamaResponse = response.json().await?;
-        let parsed: serde_json::Value = serde_json::from_str(crate::llm_json::extract_json_object(&ollama_response.response))
-            .map_err(|_| "local AI returned invalid JSON")?;
-        let decision = parsed["decision"].as_str().unwrap_or("NEEDS_REVIEW").to_uppercase();
-        let decision = match decision.as_str() {
-            "ACCEPT" | "REJECT" | "NEEDS_REVIEW" => decision,
-            _ => "NEEDS_REVIEW".to_string(),
-        };
-        let confidence = parsed["confidence"].as_f64().unwrap_or(0.0).clamp(0.0, 1.0) as f32;
-        let reason = parsed["reason"].as_str().unwrap_or("Local AI could not establish a safe decision.").to_string();
-        Ok(IntentDecision { decision, confidence, reason })
     }
 
 }

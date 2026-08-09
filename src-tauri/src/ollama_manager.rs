@@ -24,7 +24,7 @@ impl OllamaManager {
     pub fn new(model_name: Option<String>) -> Self {
         OllamaManager {
             process: Arc::new(Mutex::new(None)),
-            model_name: model_name.unwrap_or_else(|| "llama2".to_string()),
+            model_name: model_name.unwrap_or_else(|| "qwen2.5:0.5b".to_string()),
         }
     }
 

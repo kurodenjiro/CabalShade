@@ -19,9 +19,43 @@
 //! charter: the rules are exercised on in-memory state.
 
 use crate::ids::IntentId;
-use crate::intent::{IntentDraft, IntentStatus};
+use crate::intent::{IntentDraft, IntentStatus, MatchTerms};
+use crate::money::UsdPrice;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+
+/// Where an intent came from, when it is not this device's own.
+///
+/// A peer's order is mirrored into the local ledger so it can be matched and
+/// rendered like any other, but the two nodes know it by different ids — this
+/// records the id the originator uses, which is the only name both sides can
+/// agree on when they later exchange a settlement.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteOrigin {
+    /// The id the originating peer knows this intent by.
+    pub intent_id: String,
+    /// The peer's public Solana receiving address. Never key material.
+    pub wallet: String,
+}
+
+/// The counterparty an intent is paired with, and the terms.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MatchRecord {
+    /// The paired intent, as this ledger names it.
+    pub counterparty: IntentId,
+    /// The counterparty's public Solana receiving address. Empty when both
+    /// sides were composed on this device.
+    pub wallet: String,
+    /// The price both conditions accept, from [`IntentDraft::match_with`] and
+    /// then from whatever the negotiation agreed within those bounds.
+    pub price: Option<UsdPrice>,
+    /// The broadcast route length this order had before pairing, so unpairing
+    /// restores the real one rather than inventing a hop count.
+    #[serde(default)]
+    pub route_len: u8,
+}
 
 /// A persisted intent: the user's request plus where it is in its life.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -34,6 +68,29 @@ pub struct StoredIntent {
     pub created_at: u64,
     /// Unix timestamp of the last transition, in seconds.
     pub updated_at: u64,
+    /// Set when this is a mirror of a peer's order rather than one composed
+    /// here. `default` so ledgers written before matching existed still load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<RemoteOrigin>,
+    /// Set once this intent is paired with its opposite side.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched: Option<MatchRecord>,
+}
+
+impl StoredIntent {
+    /// Whether this order was composed on this device — as opposed to being a
+    /// mirror of a peer's. Only a local order commits this wallet's funds.
+    #[must_use]
+    pub const fn is_local(&self) -> bool {
+        self.origin.is_none()
+    }
+
+    /// Whether this order can still be paired: live on the mesh, and not
+    /// already spoken for.
+    #[must_use]
+    pub const fn is_open(&self) -> bool {
+        matches!(self.status, IntentStatus::Broadcast { .. }) && self.matched.is_none()
+    }
 }
 
 /// Why a transition was rejected.
@@ -114,8 +171,24 @@ impl IntentStore {
             status: IntentStatus::Draft,
             created_at: now,
             updated_at: now,
+            origin: None,
+            matched: None,
         };
         self.intents.insert(id.clone(), stored);
+        id
+    }
+
+    /// Mirrors a peer's order into this ledger, tagged with where it came from.
+    ///
+    /// Separate from [`Self::create`] so a remote order can never be minted
+    /// without its origin: an untagged mirror looks local, and a local order is
+    /// one this device is willing to fund.
+    #[must_use]
+    pub fn create_remote(&mut self, draft: IntentDraft, origin: RemoteOrigin, now: u64) -> IntentId {
+        let id = self.create(draft, now);
+        if let Some(stored) = self.intents.get_mut(&id) {
+            stored.origin = Some(origin);
+        }
         id
     }
 
@@ -123,6 +196,21 @@ impl IntentStore {
     #[must_use]
     pub fn get(&self, id: &IntentId) -> Option<&StoredIntent> {
         self.intents.get(id)
+    }
+
+    /// Looks a mirrored order up by the id its originating peer uses.
+    ///
+    /// An empty id matches nothing: a peer too old to send one leaves the field
+    /// blank, and treating blank as a key would make every such order the same
+    /// order.
+    #[must_use]
+    pub fn by_origin(&self, remote_intent_id: &str) -> Option<&StoredIntent> {
+        if remote_intent_id.is_empty() {
+            return None;
+        }
+        self.intents
+            .values()
+            .find(|intent| intent.origin.as_ref().is_some_and(|o| o.intent_id == remote_intent_id))
     }
 
     /// All intents, in creation order.
@@ -154,6 +242,116 @@ impl IntentStore {
         stored.status = to;
         stored.updated_at = now;
         Ok(())
+    }
+
+    /// The open counterparty for `id`, and the terms the pair clears at.
+    ///
+    /// A pair must include at least one order composed here. Two mirrored peer
+    /// orders may well match each other, but this node is not a party to that
+    /// trade and must not pair — let alone settle — it.
+    ///
+    /// Ties go to the oldest open order, so both devices, scanning ledgers that
+    /// hold the same two sides, pick the same one.
+    #[must_use]
+    pub fn find_counterparty(&self, id: &IntentId) -> Option<(IntentId, MatchTerms)> {
+        let subject = self.get(id)?;
+        if !subject.is_open() {
+            return None;
+        }
+        self.intents
+            .values()
+            .filter(|other| other.id != subject.id && other.is_open())
+            .filter(|other| subject.is_local() || other.is_local())
+            .filter_map(|other| subject.draft.match_with(&other.draft).map(|terms| (other, terms)))
+            .min_by_key(|(other, _)| (other.created_at, other.id.clone()))
+            .map(|(other, terms)| (other.id.clone(), terms))
+    }
+
+    /// Pairs two open intents and moves both into negotiation.
+    ///
+    /// Each side records the *other* side's wallet, so the settlement leg has a
+    /// real payee rather than a fallback address.
+    ///
+    /// # Errors
+    ///
+    /// [`IntentStoreError::NotFound`] if either id is unknown, or
+    /// [`IntentStoreError::IllegalTransition`] if either side is no longer in a
+    /// state that can negotiate.
+    pub fn pair(
+        &mut self,
+        left: &IntentId,
+        right: &IntentId,
+        terms: MatchTerms,
+        now: u64,
+    ) -> Result<(), IntentStoreError> {
+        let wallet_of = |id: &IntentId| -> Result<String, IntentStoreError> {
+            let intent = self.get(id).ok_or_else(|| IntentStoreError::NotFound(id.clone()))?;
+            Ok(intent.origin.as_ref().map_or_else(String::new, |o| o.wallet.clone()))
+        };
+        let left_wallet = wallet_of(left)?;
+        let right_wallet = wallet_of(right)?;
+
+        let negotiating = IntentStatus::Negotiating { bids: 1, best: terms.price };
+        // Both transitions are checked before either record is written, so a
+        // rejected side cannot leave the other holding a match to nothing.
+        for id in [left, right] {
+            let intent = self.get(id).ok_or_else(|| IntentStoreError::NotFound(id.clone()))?;
+            if !intent.status.can_transition_to(&negotiating) {
+                return Err(IntentStoreError::IllegalTransition {
+                    from: intent.status.clone(),
+                    to: negotiating.clone(),
+                });
+            }
+        }
+
+        for (id, counterparty, wallet) in [
+            (left, right, right_wallet),
+            (right, left, left_wallet),
+        ] {
+            let intent = self.intents.get_mut(id).expect("checked above");
+            let route_len = match intent.status {
+                IntentStatus::Broadcast { route_len } => route_len,
+                _ => 1,
+            };
+            intent.matched = Some(MatchRecord {
+                counterparty: counterparty.clone(),
+                wallet,
+                price: terms.price,
+                route_len,
+            });
+            intent.status = negotiating.clone();
+            intent.updated_at = now;
+        }
+        Ok(())
+    }
+
+    /// Breaks a pair, returning whichever side is still live to the open book.
+    ///
+    /// Called when one side is cancelled: the other has done nothing wrong and
+    /// must be matchable again rather than negotiating with an order that no
+    /// longer exists. A side that has moved past negotiation keeps its state —
+    /// routing or settlement is not something a cancellation elsewhere undoes.
+    ///
+    /// Returns the counterparty that was released, if there was one.
+    pub fn unpair(&mut self, id: &IntentId, now: u64) -> Option<IntentId> {
+        let counterparty = self.intents.get_mut(id)?.matched.take()?.counterparty;
+        let other = self.intents.get_mut(&counterparty)?;
+        // Its own record holds its own hop count — the cancelled side's record
+        // describes the cancelled side.
+        let route_len = other.matched.take().map_or(1, |record| record.route_len);
+        if matches!(other.status, IntentStatus::Negotiating { .. }) {
+            other.status = IntentStatus::Broadcast { route_len };
+            other.updated_at = now;
+        }
+        Some(counterparty)
+    }
+
+    /// Records the price the two sides settled on, once negotiation has moved
+    /// it inside the matched band.
+    pub fn set_match_price(&mut self, id: &IntentId, price: Option<UsdPrice>) {
+        if let Some(record) = self.intents.get_mut(id).and_then(|i| i.matched.as_mut()) {
+            record.price = price;
+        }
     }
 }
 
@@ -274,6 +472,185 @@ mod tests {
             )
             .unwrap();
         assert!(store.get(&id).unwrap().status.is_terminal());
+    }
+
+    fn sided(action: Action, condition: Condition) -> IntentDraft {
+        IntentDraft { action, condition, ..draft() }
+    }
+
+    fn origin(intent_id: &str) -> RemoteOrigin {
+        RemoteOrigin {
+            intent_id: intent_id.to_string(),
+            wallet: "GyzdBSo87y5vT4oyoBCAdeT7hSz4C2ihj89QrVGCpdRa".to_string(),
+        }
+    }
+
+    /// Broadcasts `id` so it is open for matching.
+    fn open(store: &mut IntentStore, id: &IntentId) {
+        store
+            .transition(id, IntentStatus::Broadcast { route_len: 1 }, 1_700_000_001)
+            .unwrap();
+    }
+
+    #[test]
+    fn a_local_order_pairs_with_a_mirrored_peer_order() {
+        let mut store = IntentStore::new();
+        let mine = store.create(sided(Action::Buy, Condition::Any), 1_700_000_000);
+        let theirs = store.create_remote(
+            sided(Action::Sell, Condition::Any),
+            origin("int-0000002a"),
+            1_700_000_000,
+        );
+        open(&mut store, &mine);
+        open(&mut store, &theirs);
+
+        let (found, terms) = store.find_counterparty(&mine).expect("opposite side is open");
+        assert_eq!(found, theirs);
+        store.pair(&mine, &theirs, terms, 1_700_000_002).unwrap();
+
+        let record = store.get(&mine).unwrap().matched.as_ref().unwrap();
+        assert_eq!(record.counterparty, theirs);
+        // Each side carries the *other* side's wallet, which is what the
+        // settlement leg pays.
+        assert_eq!(record.wallet, origin("").wallet);
+        assert!(store.get(&theirs).unwrap().matched.as_ref().unwrap().wallet.is_empty());
+        assert!(matches!(
+            store.get(&theirs).unwrap().status,
+            IntentStatus::Negotiating { .. }
+        ));
+    }
+
+    #[test]
+    fn two_mirrored_peer_orders_do_not_pair_here() {
+        let mut store = IntentStore::new();
+        let one = store.create_remote(sided(Action::Buy, Condition::Any), origin("a"), 1_700_000_000);
+        let two = store.create_remote(sided(Action::Sell, Condition::Any), origin("b"), 1_700_000_000);
+        open(&mut store, &one);
+        open(&mut store, &two);
+        // This device is party to neither, so it has nothing to settle.
+        assert_eq!(store.find_counterparty(&one), None);
+    }
+
+    #[test]
+    fn an_already_matched_order_is_not_offered_again() {
+        let mut store = IntentStore::new();
+        let buy = store.create(sided(Action::Buy, Condition::Any), 1_700_000_000);
+        let sell = store.create_remote(sided(Action::Sell, Condition::Any), origin("a"), 1_700_000_000);
+        let late = store.create_remote(sided(Action::Sell, Condition::Any), origin("b"), 1_700_000_001);
+        for id in [&buy, &sell, &late] {
+            open(&mut store, id);
+        }
+        let (found, terms) = store.find_counterparty(&buy).unwrap();
+        store.pair(&buy, &found, terms, 1_700_000_002).unwrap();
+
+        assert_eq!(store.find_counterparty(&buy), None);
+        assert_eq!(store.find_counterparty(&sell), None);
+        // The third order is still open and still unmatched.
+        assert!(store.get(&late).unwrap().is_open());
+    }
+
+    #[test]
+    fn unpairing_returns_the_surviving_side_to_the_open_book() {
+        let mut store = IntentStore::new();
+        let mine = store.create(sided(Action::Buy, Condition::Any), 1_700_000_000);
+        let theirs =
+            store.create_remote(sided(Action::Sell, Condition::Any), origin("a"), 1_700_000_000);
+        store
+            .transition(&mine, IntentStatus::Broadcast { route_len: 3 }, 1_700_000_001)
+            .unwrap();
+        open(&mut store, &theirs);
+        let (found, terms) = store.find_counterparty(&mine).unwrap();
+        store.pair(&mine, &found, terms, 1_700_000_002).unwrap();
+
+        // Cancelling one side releases the other with its real hop count.
+        assert_eq!(store.unpair(&theirs, 1_700_000_003), Some(mine.clone()));
+        store
+            .transition(&theirs, IntentStatus::Cancelled, 1_700_000_003)
+            .unwrap();
+        let survivor = store.get(&mine).unwrap();
+        assert_eq!(survivor.status, IntentStatus::Broadcast { route_len: 3 });
+        assert!(survivor.is_open(), "it must be matchable again");
+    }
+
+    #[test]
+    fn unpairing_does_not_rewind_a_side_that_has_already_routed() {
+        let mut store = IntentStore::new();
+        let mine = store.create(sided(Action::Buy, Condition::Any), 1_700_000_000);
+        let theirs =
+            store.create_remote(sided(Action::Sell, Condition::Any), origin("a"), 1_700_000_000);
+        open(&mut store, &mine);
+        open(&mut store, &theirs);
+        let (found, terms) = store.find_counterparty(&mine).unwrap();
+        store.pair(&mine, &found, terms, 1_700_000_002).unwrap();
+        store
+            .transition(&mine, IntentStatus::FindingRoute, 1_700_000_003)
+            .unwrap();
+
+        store.unpair(&theirs, 1_700_000_004);
+        assert_eq!(store.get(&mine).unwrap().status, IntentStatus::FindingRoute);
+    }
+
+    #[test]
+    fn incompatible_prices_leave_both_sides_open() {
+        let mut store = IntentStore::new();
+        let buy = store.create(
+            sided(Action::Buy, Condition::Under { price: crate::money::UsdPrice::from_cents(9000) }),
+            1_700_000_000,
+        );
+        let sell = store.create_remote(
+            sided(Action::Sell, Condition::Above { price: crate::money::UsdPrice::from_cents(9500) }),
+            origin("a"),
+            1_700_000_000,
+        );
+        open(&mut store, &buy);
+        open(&mut store, &sell);
+        assert_eq!(store.find_counterparty(&buy), None);
+    }
+
+    #[test]
+    fn a_pair_survives_persistence() {
+        let mut store = IntentStore::new();
+        let buy = store.create(sided(Action::Buy, Condition::Any), 1_700_000_000);
+        let sell = store.create_remote(sided(Action::Sell, Condition::Any), origin("a"), 1_700_000_000);
+        open(&mut store, &buy);
+        open(&mut store, &sell);
+        let (found, terms) = store.find_counterparty(&buy).unwrap();
+        store.pair(&buy, &found, terms, 1_700_000_002).unwrap();
+
+        let json = serde_json::to_string(&store.snapshot()).unwrap();
+        let mut restored = IntentStore::new();
+        restored.restore(serde_json::from_str(&json).unwrap());
+
+        assert_eq!(
+            restored.get(&buy).unwrap().matched.as_ref().unwrap().counterparty,
+            sell
+        );
+        assert_eq!(restored.by_origin("a").map(|i| i.id.clone()), Some(sell));
+    }
+
+    #[test]
+    fn a_ledger_written_before_matching_still_loads() {
+        // No `origin` and no `matched` keys: exactly what the previous build
+        // wrote. Losing those ledgers on upgrade would delete live intents.
+        let json = r#"{
+            "intents": [{
+                "id": "int-00000001",
+                "draft": {
+                    "action": "BUY", "asset": "SOL",
+                    "condition": { "kind": "any" },
+                    "amount": { "raw": 10000000000, "decimals": 9 },
+                    "mode": "SHARK", "privacy": "MEDIUM"
+                },
+                "status": { "status": "BROADCAST", "route_len": 1 },
+                "createdAt": 1700000000, "updatedAt": 1700000000
+            }],
+            "nextId": 1
+        }"#;
+        let mut store = IntentStore::new();
+        store.restore(serde_json::from_str(&json).unwrap());
+        let restored = store.get(&IntentId::new("int-00000001")).unwrap();
+        assert!(restored.is_local());
+        assert!(restored.is_open());
     }
 
     #[test]

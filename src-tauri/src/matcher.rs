@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::error::Error;
 
 use crate::blockchain_bridge::AssetListingView;
+use cabal_core::{Condition, IntentDraft, UsdPrice};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct OllamaRequest {
@@ -19,13 +20,19 @@ struct OllamaResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MatchResult {
-    pub listing_id: u64,
     pub seller: String,
     pub description: String,
-    pub price_avax: String,
-    pub price_wei: String,
-    pub token_id: u64,
+    /// Listing price in native SOL, never AVAX/wei.
+    pub price_sol: String,
     pub reason: String,
+}
+
+/// A local-LLM proposal for a directly matched mesh order. The proposal is
+/// informational until the deterministic condition checks below accept it.
+#[derive(Debug, Clone)]
+pub struct TradeNegotiation {
+    pub accepted: bool,
+    pub price: Option<UsdPrice>,
 }
 
 /// Matches a buyer's free-text intent against real on-chain listings using
@@ -87,7 +94,7 @@ Catalog:
         );
 
         let request = OllamaRequest {
-            model: "llama2".to_string(),
+            model: "qwen2.5:0.5b".to_string(),
             prompt: format!("Buyer intent: {}", intent),
             stream: false,
             system: Some(system_prompt),
@@ -135,13 +142,57 @@ Catalog:
         }
 
         Ok(Some(MatchResult {
-            listing_id: listing.id,
             seller: listing.seller.clone(),
             description: listing.description.clone(),
-            price_avax: listing.price_avax.clone(),
-            price_wei: listing.price_wei.clone(),
-            token_id: listing.token_id,
+            price_sol: listing.price_avax.clone(),
             reason: parsed["reason"].as_str().unwrap_or("Matched").to_string(),
         }))
+    }
+
+    /// Calls the local Ollama API to negotiate a price for an already matched
+    /// BUY/SELL pair. The model never authorizes a transfer: its output is
+    /// parsed and bounded by the orders' declared price conditions.
+    pub async fn negotiate_trade(
+        &self,
+        local: &IntentDraft,
+        remote: &IntentDraft,
+    ) -> Result<TradeNegotiation, Box<dyn Error>> {
+        let request = OllamaRequest {
+            model: "qwen2.5:0.5b".to_string(),
+            prompt: format!(
+                "Local order: {}\nRemote order: {}",
+                serde_json::to_string(local)?,
+                serde_json::to_string(remote)?,
+            ),
+            stream: false,
+            system: Some(
+                "You negotiate one matched SOL/USDC order. Respond ONLY JSON: {\"decision\":\"accept\"|\"reject\",\"price_usdc\":\"decimal\"}. The price is USDC per SOL. Accept only when amounts and conditions are compatible."
+                    .to_string(),
+            ),
+        };
+        let response = self
+            .client
+            .post(format!("{}/api/generate", self.url()))
+            .json(&request)
+            .send()
+            .await?;
+        let body: OllamaResponse = response.json().await?;
+        let json = crate::llm_json::extract_json_object(&body.response);
+        let value: serde_json::Value = serde_json::from_str(json)?;
+        let accepted = value["decision"].as_str() == Some("accept");
+        let price = value["price_usdc"]
+            .as_str()
+            .and_then(|raw| UsdPrice::parse(raw).ok())
+            .filter(|candidate| condition_allows(&local.condition, *candidate))
+            .filter(|candidate| condition_allows(&remote.condition, *candidate));
+        Ok(TradeNegotiation { accepted, price })
+    }
+}
+
+fn condition_allows(condition: &Condition, candidate: UsdPrice) -> bool {
+    match condition {
+        Condition::Under { price } => candidate <= *price,
+        Condition::Above { price } => candidate >= *price,
+        Condition::Any => true,
     }
 }

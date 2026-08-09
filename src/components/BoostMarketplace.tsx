@@ -4,6 +4,17 @@ import { Button, Panel } from "../ds";
 import type { BoostNft } from "../boosts";
 import { boostExpired, boostLabel } from "../boosts";
 
+const formatLamportsToSol = (lamports: string): string => {
+  const value = Number(lamports);
+  return Number.isFinite(value) ? (value / 1_000_000_000).toFixed(4) : "0.0000";
+};
+
+const errorText = (error: unknown): string => {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  try { return JSON.stringify(error); } catch { return "Unknown error"; }
+};
+
 /**
  * SPL boost inventory and mesh marketplace affordances.
  *
@@ -20,11 +31,16 @@ export function BoostMarketplace() {
     setBusy("demo");
     setMessage(null);
     try {
-      await invoke("claim_demo_boost");
-      setMessage("DEMO BOOST CLAIMED. REFRESHING WALLET...");
+      const mint = await invoke<string>("claim_demo_boost");
+      setMessage(`DEMO BOOST MINTED — ${mint.slice(0, 8)}…${mint.slice(-6)}.`);
+      // The transaction is confirmed before the command returns. Keep a short
+      // retry for devnet RPC propagation, but never invent an asset locally.
       refresh();
-    } catch {
-      setMessage("DEMO CLAIM IS AVAILABLE ONLY FOR THE CONFIGURED DEVNET DEMO WALLET.");
+      window.dispatchEvent(new Event("boost-inventory-updated"));
+      window.setTimeout(refresh, 1200);
+    } catch (error) {
+      const detail = errorText(error);
+      setMessage(`DEMO FAUCET FAILED — ${detail.slice(0, 180)}`);
     } finally {
       setBusy(null);
     }
@@ -36,7 +52,11 @@ export function BoostMarketplace() {
       .catch(() => setItems([]));
   };
 
-  useEffect(() => refresh(), []);
+  useEffect(() => {
+    refresh();
+    const timer = window.setInterval(refresh, 5_000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   const useBoost = async (mint: string) => {
     setBusy(mint);
@@ -44,9 +64,12 @@ export function BoostMarketplace() {
     try {
       await invoke("use_boost_nft", { mint });
       setMessage("BOOST USED. SPL NFT BURN CONFIRMED.");
-      refresh();
-    } catch {
-      setMessage("BOOST BURN FAILED OR WALLET HAS NO TOKEN ACCOUNT.");
+      setItems((current) => (current ?? []).filter((item) => item.mint !== mint));
+      window.dispatchEvent(new Event("boost-inventory-updated"));
+      window.setTimeout(refresh, 1200);
+    } catch (error) {
+      const detail = errorText(error);
+      setMessage(`BOOST BURN FAILED — ${detail.slice(0, 180)}`);
     } finally {
       setBusy(null);
     }
@@ -57,10 +80,20 @@ export function BoostMarketplace() {
     setMessage(null);
     try {
       await invoke("list_boost_nft", { mint, priceLamports: "10000000" });
-      setMessage("LISTING INTENT SENT THROUGH MESH.");
+      const id = await invoke<string>("broadcast_intent", {
+        draft: {
+          action: "SELL",
+          asset: "BOOST NFT",
+          condition: { kind: "any", price: null },
+          amount: "1",
+          mode: "SHARK",
+          privacy: "MEDIUM",
+        },
+      });
+      setMessage(`NFT LISTED + MESH INTENT BROADCAST — ${id}.`);
       refresh();
-    } catch {
-      setMessage("LISTING FAILED — CHECK MINT OWNERSHIP AND SOL BALANCE.");
+    } catch (error) {
+      setMessage(`LISTING FAILED — ${errorText(error).slice(0, 180)}`);
     } finally {
       setBusy(null);
     }
@@ -74,8 +107,8 @@ export function BoostMarketplace() {
       await invoke("buy_boost_nft", { mint: item.mint, seller: item.seller });
       setMessage("BOOST PURCHASE CONFIRMED ON SOLANA.");
       refresh();
-    } catch {
-      setMessage("PURCHASE FAILED — CHECK SOL BALANCE OR LISTING EXPIRY.");
+    } catch (error) {
+      setMessage(`PURCHASE FAILED — ${errorText(error).slice(0, 180)}`);
     } finally {
       setBusy(null);
     }
@@ -85,9 +118,9 @@ export function BoostMarketplace() {
     <Panel label="SPL BOOST NFT / MESH MARKET">
       <div style={{ display: "flex", flexDirection: "column" }}>
         <div style={{ padding: "var(--space-5) var(--space-6)", color: "var(--text-muted)", fontSize: "var(--text-sm)" }}>
-          Only boost items are tradeable. Using one burns the SPL NFT; expiry removes the effect automatically.
+          Only boost items are tradeable. Using one burns the SPL NFT; inventory syncs automatically every 5 seconds.
         </div>
-        <div style={{ padding: "0 var(--space-6) var(--space-5)" }}>
+        <div style={{ padding: "0 var(--space-6) var(--space-5)", display: "flex", gap: "var(--space-3)" }}>
           <Button tone="secondary" size="sm" className="cm-touch" disabled={busy === "demo"} onClick={claimDemo}>CLAIM DEMO BOOST</Button>
         </div>
         {items === null ? null : items.length === 0 ? (
@@ -102,10 +135,10 @@ export function BoostMarketplace() {
                 <span style={{ fontFamily: "var(--type-heading-family)", color: "var(--text-primary)" }}>{item.name}</span>
                 <span style={{ fontFamily: "var(--type-label-family)", fontSize: "var(--text-2xs)", color: expired ? "var(--text-alert)" : "var(--text-muted)" }}>{boostLabel(item)}</span>
               </div>
-              {item.owned && !item.listed && !expired && <Button tone="primary" size="sm" className="cm-touch" disabled={busy === item.mint} onClick={() => useBoost(item.mint)}>USE / BURN</Button>}
+              {item.owned && !item.listed && !expired && <Button tone="primary" size="sm" className="cm-touch" disabled={busy === item.mint} onClick={() => useBoost(item.mint)}>BURN</Button>}
               {item.owned && !item.listed && !expired && <Button tone="secondary" size="sm" className="cm-touch" disabled={busy === item.mint} onClick={() => listBoost(item.mint)}>SELL VIA MESH</Button>}
               {item.listed && <span style={{ fontSize: "var(--text-2xs)", color: "var(--text-muted)" }}>LISTED</span>}
-              {!item.owned && item.listed && <Button tone="primary" size="sm" className="cm-touch" disabled={busy === item.mint} onClick={() => buyBoost(item)}>BUY {item.priceLamports ? `${item.priceLamports} LAMPORTS` : "BOOST"}</Button>}
+              {!item.owned && item.listed && <Button tone="primary" size="sm" className="cm-touch" disabled={busy === item.mint} onClick={() => buyBoost(item)}>BUY {item.priceLamports ? `${formatLamportsToSol(item.priceLamports)} SOL` : "BOOST"}</Button>}
             </div>
           );
         })}
