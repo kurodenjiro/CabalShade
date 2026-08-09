@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Badge, Button, Panel, StatusDot } from "../ds";
 import type { IntentTab } from "../shell/screen";
-import type { IntentView } from "../types/bindings";
+import type { IntentDecision, IntentView } from "../types/bindings";
 
 const TABS: IntentTab[] = ["ACTIVE", "PENDING", "HISTORY"];
 
@@ -40,6 +40,7 @@ export function Intents({
   onCompose: () => void;
 }) {
   const [intents, setIntents] = useState<IntentView[] | null>(null);
+  const [lastDecision, setLastDecision] = useState<IntentDecision | null>(null);
 
   const fetchIntents = () => {
     invoke<IntentView[]>("list_intents", { filter: tab })
@@ -60,6 +61,44 @@ export function Intents({
       cancelled = true;
     };
   }, [tab]);
+
+  // A second desktop instance can receive an off-chain intent over GossipSub.
+  // Ask its local Ollama agent to evaluate it and publish the decision back.
+  // The origin instance is skipped because it already has the intent locally.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    listen<unknown>("mesh-event", (event) => {
+      const message = event.payload as { type?: string; intent?: { payload?: string } };
+      if (message?.type !== "IntentReceived") return;
+      const raw = message.intent?.payload;
+      if (!raw) return;
+      let envelope: { intent_id?: string };
+      try {
+        envelope = JSON.parse(raw) as { intent_id?: string };
+      } catch {
+        return;
+      }
+      const intentId = envelope.intent_id;
+      if (!intentId) return;
+      invoke("get_intent", { id: intentId })
+        .then(() => undefined)
+        .catch(() =>
+          invoke<IntentDecision>("analyze_incoming_intent", { intentJson: raw })
+            .then((decision) => {
+              setLastDecision(decision);
+              return invoke("respond_to_intent", { intentId, decision: decision.decision, reason: decision.reason });
+            })
+            .catch(() => undefined),
+        );
+    })
+      .then((fn) => {
+        unlisten = fn;
+      })
+      .catch(() => undefined);
+    return () => {
+      if (unlisten) unlisten();
+    };
+  }, []);
 
   // Refresh when Rust emits `intent-updated` (broadcast / cancel / settle), so
   // the list tracks real transitions without polling.
@@ -156,6 +195,14 @@ export function Intents({
           </Button>
         </>
       )}
+      {lastDecision ? (
+        <Panel label="LOCAL AI DECISION">
+          <div style={{ display: "grid", gap: "var(--space-2)", padding: "var(--space-4)", fontSize: "var(--text-2xs)", letterSpacing: "var(--tracking-widest)" }}>
+            <span>{lastDecision.decision} · {Math.round(lastDecision.confidence * 100)}%</span>
+            <span style={{ color: "var(--text-muted)" }}>{lastDecision.reason}</span>
+          </div>
+        </Panel>
+      ) : null}
     </div>
   );
 }

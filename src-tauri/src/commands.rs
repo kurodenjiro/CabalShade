@@ -617,8 +617,14 @@ pub async fn broadcast_intent(
     if let Some(mesh) = services.mesh.as_ref() {
         let intent = crate::mesh::PrivacyIntent {
             intent_type: "trade".into(),
-            payload: serde_json::to_string(&draft).unwrap_or_default(),
-            encrypted: true,
+            payload: serde_json::json!({
+                "intent_id": id.to_string(),
+                "draft": draft,
+            }).to_string(),
+            // The current mesh transport does not encrypt payloads. Keeping
+            // this false prevents the protocol from claiming privacy it does
+            // not yet provide; encryption is a separate transport milestone.
+            encrypted: false,
             relay_path: vec!["origin_node".into()],
             relay_fee: None,
         };
@@ -1060,6 +1066,53 @@ pub async fn preview_intent(
         ReviewRow { key: "MODE".into(), value: mode },
         ReviewRow { key: "PRIVACY".into(), value: privacy },
     ])
+}
+
+/// Lets the local model evaluate an incoming off-chain intent. A missing
+/// Ollama server is an explicit error; the app never substitutes mock AI.
+#[tauri::command]
+pub async fn analyze_incoming_intent(
+    intent_json: String,
+    state: State<'_, AppState>,
+) -> Result<crate::agent::IntentDecision, AppError> {
+    let services = state.services()?;
+    services
+        .agent
+        .analyze_intent(&intent_json)
+        .await
+        .map_err(|_| AppError::Unsupported { feature: "local_ai" })
+}
+
+/// Publishes the local AI's decision back to the mesh. This is still an
+/// off-chain protocol message; settlement remains a separate explicit action.
+#[tauri::command]
+pub async fn respond_to_intent(
+    intent_id: String,
+    decision: String,
+    reason: String,
+    state: State<'_, AppState>,
+) -> Result<(), AppError> {
+    let normalized = decision.to_uppercase();
+    if !matches!(normalized.as_str(), "ACCEPT" | "REJECT" | "NEEDS_REVIEW") {
+        return Err(AppError::InvalidIntent { field: "decision", reason: crate::error::InvalidReason::Malformed });
+    }
+    let services = state.services()?;
+    let mesh = services.mesh.as_ref().ok_or(AppError::MeshOffline)?;
+    let payload = serde_json::json!({
+        "type": "IntentDecision",
+        "intent_id": intent_id,
+        "decision": normalized,
+        "reason": reason,
+    });
+    mesh.publish(crate::mesh::PrivacyIntent {
+        intent_type: "intent_decision".into(),
+        payload: payload.to_string(),
+        encrypted: false,
+        relay_path: vec!["origin_node".into()],
+        relay_fee: None,
+    }).await.map_err(|_| AppError::MeshOffline)?;
+    crate::activity::append("INTENT_DECISION", payload.to_string());
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

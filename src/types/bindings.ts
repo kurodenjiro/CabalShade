@@ -188,6 +188,7 @@ isTestnet: boolean, };
 export type ActivityEntry = { id: string, kind: string, summary: string, createdAt: number, };
 export type ActivityLogView = { entries: Array<ActivityEntry>, broadcastCount: number, settledCount: number, cancelledCount: number, relayedCount: number, };
 export type AchievementView = { id: string, title: string, description: string, progress: number, target: number, status: string, nftAddress: string | null, };
+export type IntentDecision = { decision: string, confidence: number, reason: string, };
 
 /**
  * A settlement proof hash. Displayed lowercase and unabbreviated.
