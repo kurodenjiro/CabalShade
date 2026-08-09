@@ -336,6 +336,7 @@ pub fn run() {
                     commands::vault_keys,
                     commands::profile_summary,
                     commands::activity_log,
+                    commands::achievements,
                     commands::set_offline_mode,
                     commands::broadcast_intent,
                     commands::get_intent,
@@ -402,7 +403,7 @@ pub fn run() {
             {
                 // Mobile gets the reshaped surface only. Screen commands join
                 // it as their screens land.
-                tauri::generate_handler![commands::unsubscribe, commands::session_status, commands::enter_mesh, commands::mesh_snapshot, commands::subscribe_mesh_log, commands::list_nearby_nodes, commands::list_intents, commands::intent_form_options, commands::preview_intent, commands::vault_assets, commands::vault_identities, commands::vault_keys, commands::profile_summary, commands::activity_log, commands::set_offline_mode, commands::broadcast_intent, commands::get_intent, commands::cancel_intent, commands::settle_intent, commands::vault_total, commands::export_mnemonic, commands::copy_mnemonic, commands::import_mnemonic, commands::suggest_mnemonic_word]
+                tauri::generate_handler![commands::unsubscribe, commands::session_status, commands::enter_mesh, commands::mesh_snapshot, commands::subscribe_mesh_log, commands::list_nearby_nodes, commands::list_intents, commands::intent_form_options, commands::preview_intent, commands::vault_assets, commands::vault_identities, commands::vault_keys, commands::profile_summary, commands::activity_log, commands::achievements, commands::set_offline_mode, commands::broadcast_intent, commands::get_intent, commands::cancel_intent, commands::settle_intent, commands::vault_total, commands::export_mnemonic, commands::copy_mnemonic, commands::import_mnemonic, commands::suggest_mnemonic_word]
             }
         })
         .build(tauri::generate_context!())

@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Badge, Button, Icon, Panel, Switch } from "../ds";
 import type { GlyphName } from "../shell/screen";
-import type { ActivityLogView, ProfileView } from "../types/bindings";
+import type { AchievementView, ActivityLogView, ProfileView } from "../types/bindings";
 
 const ROWS: ReadonlyArray<{ label: string; icon: GlyphName }> = [
   { label: "ACHIEVEMENTS", icon: "reputation" },
@@ -27,6 +27,7 @@ const ROWS: ReadonlyArray<{ label: string; icon: GlyphName }> = [
 export function Profile({ onLeave }: { onLeave: () => void }) {
   const [profile, setProfile] = useState<ProfileView | null>(null);
   const [activity, setActivity] = useState<ActivityLogView | null>(null);
+  const [achievementList, setAchievementList] = useState<AchievementView[]>([]);
   const [expanded, setExpanded] = useState<"achievements" | "activity" | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -46,6 +47,22 @@ export function Profile({ onLeave }: { onLeave: () => void }) {
 
     refresh();
     const timer = window.setInterval(refresh, 5_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const refreshAchievements = () =>
+      invoke<AchievementView[]>("achievements")
+        .then((next) => {
+          if (!cancelled) setAchievementList(next);
+        })
+        .catch(() => undefined);
+    refreshAchievements();
+    const timer = window.setInterval(refreshAchievements, 5_000);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
@@ -170,9 +187,12 @@ export function Profile({ onLeave }: { onLeave: () => void }) {
 
         {expanded === "achievements" ? (
           <div className="cm-row" style={{ display: "grid", gap: "var(--space-3)", padding: "var(--space-4) var(--space-6)", borderTop: "var(--border-hairline-style)", color: "var(--text-muted)", fontSize: "var(--text-2xs)", letterSpacing: "var(--tracking-widest)" }}>
-            <span>BROADCASTS: {activity?.broadcastCount ?? "—"}</span>
-            <span>SETTLED: {activity?.settledCount ?? "—"}</span>
-            <span>CANCELLED: {activity?.cancelledCount ?? "—"}</span>
+            {achievementList.length ? achievementList.map((item) => (
+              <div key={item.id} style={{ display: "grid", gap: "var(--space-1)" }}>
+                <span style={{ color: item.status === "ELIGIBLE" ? "var(--accent-green)" : "var(--text-secondary)" }}>{item.title} · {item.status}</span>
+                <span>{item.progress}/{item.target} · {item.nftAddress ? `NFT ${item.nftAddress}` : "NFT NOT MINTED"}</span>
+              </div>
+            )) : <span>ACHIEVEMENTS UNAVAILABLE</span>}
           </div>
         ) : null}
         {expanded === "activity" ? (

@@ -1238,6 +1238,44 @@ pub async fn activity_log() -> Result<ActivityLogView, AppError> {
     Ok(ActivityLogView { entries, broadcast_count, settled_count, cancelled_count })
 }
 
+/// A deterministic achievement derived from persisted settlement evidence.
+/// `nftAddress` stays empty until the user explicitly mints a badge.
+#[derive(Debug, Clone, serde::Serialize)]
+#[cfg_attr(feature = "ts-rs", derive(ts_rs::TS), ts(export, export_to = "../../src/types/bindings.ts"))]
+#[serde(rename_all = "camelCase")]
+pub struct AchievementView {
+    pub id: String,
+    pub title: String,
+    pub description: String,
+    pub progress: u64,
+    pub target: u64,
+    pub status: String,
+    pub nft_address: Option<String>,
+}
+
+#[tauri::command]
+pub async fn achievements() -> Result<Vec<AchievementView>, AppError> {
+    let entries = crate::activity::all();
+    let settled = entries.iter().filter(|entry| entry.kind == "SETTLED").count() as u64;
+    let broadcasts = entries.iter().filter(|entry| entry.kind == "BROADCAST").count() as u64;
+    let achievement = |id: &str, title: &str, description: &str, progress: u64, target: u64| {
+        AchievementView {
+            id: id.to_string(),
+            title: title.to_string(),
+            description: description.to_string(),
+            progress,
+            target,
+            status: if progress >= target { "ELIGIBLE" } else { "NOT_YET" }.to_string(),
+            nft_address: None,
+        }
+    };
+    Ok(vec![
+        achievement("first-settlement", "FIRST SETTLEMENT", "Complete one verified escrow settlement.", settled.min(1), 1),
+        achievement("trusted-settler", "TRUSTED SETTLER", "Complete three verified escrow settlements.", settled.min(3), 3),
+        achievement("mesh-broadcaster", "MESH BROADCASTER", "Broadcast ten intents to the mesh.", broadcasts.min(10), 10),
+    ])
+}
+
 /// Identity and settings for the profile screen.
 ///
 /// # Errors

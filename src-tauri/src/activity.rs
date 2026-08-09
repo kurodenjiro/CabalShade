@@ -47,3 +47,8 @@ pub fn recent(limit: usize) -> Vec<ActivityEntry> {
     let entries = load_all();
     entries.into_iter().rev().take(limit).collect()
 }
+
+/// Returns the full bounded history for deriving durable achievement state.
+pub fn all() -> Vec<ActivityEntry> {
+    load_all()
+}
