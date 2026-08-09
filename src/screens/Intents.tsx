@@ -68,7 +68,17 @@ export function Intents({
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     listen<unknown>("mesh-event", (event) => {
-      const message = event.payload as { type?: string; intent?: { payload?: string } };
+      const message = event.payload as {
+        type?: string;
+        intent?: { payload?: string };
+        intent_id?: string;
+        decision?: string;
+        reason?: string;
+      };
+      if (message?.type === "IntentDecisionReceived") {
+        setLastDecision({ decision: message.decision ?? "NEEDS_REVIEW", confidence: 0, reason: message.reason ?? "" });
+        return;
+      }
       if (message?.type !== "IntentReceived") return;
       const raw = message.intent?.payload;
       if (!raw) return;
