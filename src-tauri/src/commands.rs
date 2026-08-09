@@ -631,6 +631,7 @@ pub async fn broadcast_intent(
             .save(&snapshot);
     }
 
+    crate::activity::append("BROADCAST", format!("{} intent broadcast", id));
     emit_intent_updated(&app, &id);
     Ok(id)
 }
@@ -648,6 +649,7 @@ pub async fn broadcast_intent(
 pub async fn cancel_intent(id: String, state: State<'_, AppState>) -> Result<(), AppError> {
     let services = state.services()?;
     let now = now_secs();
+    let activity_id = id.clone();
     {
         let mut store = services.intents.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let id = cabal_core::IntentId::new(id);
@@ -662,6 +664,7 @@ pub async fn cancel_intent(id: String, state: State<'_, AppState>) -> Result<(),
         .unwrap_or_default();
     let _ = cabal_store::JsonStore::new(crate::app_paths::in_data_dir("intents.json"))
         .save(&snapshot);
+    crate::activity::append("CANCEL", format!("{} intent cancelled", activity_id));
     Ok(())
 }
 
@@ -849,6 +852,11 @@ pub async fn settle_intent(
                     .unwrap_or_default();
                 let _ = cabal_store::JsonStore::new(crate::app_paths::in_data_dir("intents.json"))
                     .save(&snapshot);
+                if queued_for_relay.is_empty() {
+                    crate::activity::append("SETTLED", format!("{} intent settled", id));
+                } else {
+                    crate::activity::append("WAITING", format!("{} intent queued for relay", id));
+                }
                 emit_intent_updated(&app, &id);
             }
             Err(message) => {
@@ -1208,6 +1216,26 @@ pub struct ProfileView {
     pub network: String,
     /// Whether transactions here move real value.
     pub is_testnet: bool,
+}
+
+/// Recent persisted actions and derived achievement counters.
+#[derive(Debug, Clone, serde::Serialize)]
+#[cfg_attr(feature = "ts-rs", derive(ts_rs::TS), ts(export, export_to = "../../src/types/bindings.ts"))]
+#[serde(rename_all = "camelCase")]
+pub struct ActivityLogView {
+    pub entries: Vec<crate::activity::ActivityEntry>,
+    pub broadcast_count: u64,
+    pub settled_count: u64,
+    pub cancelled_count: u64,
+}
+
+#[tauri::command]
+pub async fn activity_log() -> Result<ActivityLogView, AppError> {
+    let entries = crate::activity::recent(50);
+    let broadcast_count = entries.iter().filter(|entry| entry.kind == "BROADCAST").count() as u64;
+    let settled_count = entries.iter().filter(|entry| entry.kind == "SETTLED").count() as u64;
+    let cancelled_count = entries.iter().filter(|entry| entry.kind == "CANCEL").count() as u64;
+    Ok(ActivityLogView { entries, broadcast_count, settled_count, cancelled_count })
 }
 
 /// Identity and settings for the profile screen.

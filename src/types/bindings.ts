@@ -185,6 +185,9 @@ reputation: string, memberSince: string, offline: boolean, network: string,
  */
 isTestnet: boolean, };
 
+export type ActivityEntry = { id: string, kind: string, summary: string, createdAt: number, };
+export type ActivityLogView = { entries: Array<ActivityEntry>, broadcastCount: number, settledCount: number, cancelledCount: number, };
+
 /**
  * A settlement proof hash. Displayed lowercase and unabbreviated.
  */
