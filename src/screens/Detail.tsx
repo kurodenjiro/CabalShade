@@ -126,6 +126,7 @@ export function Detail({
 
   const v = detail.view;
   const isNegotiating = status === "NEGOTIATING";
+  const isSolEscrow = detail.asset === "SOL";
   const negotiatedPrice = v.price;
   const live =
     status === "DRAFT" ||
@@ -213,7 +214,7 @@ export function Detail({
         <Panel label="AGENT EXCHANGE">
           <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-4)", padding: "var(--space-4)" }}>
             <AgentLine tone="done" speaker="MESH SCOUT" text="MATCHED OPPOSITE ORDER" />
-            <AgentLine tone="live" speaker="LOCAL LLM" text={negotiatedPrice ? `PROPOSED ${negotiatedPrice}` : "ANALYSING USDC TERMS…"} />
+            <AgentLine tone="live" speaker="AGENT-0X123..2413" text={negotiatedPrice ? `PROPOSED ${negotiatedPrice}` : "ANALYSING USDC TERMS…"} />
             <AgentLine tone="pending" speaker="SETTLEMENT AGENT" text={negotiatedPrice ? "WAITING FOR ACCEPTANCE" : "ROUTE LOCKS AFTER QUOTE"} />
             {log.filter((line) => line.text.includes("LLM") || line.text.includes("MESH AGENT")).slice(-2).map((line, i) => (
               <AgentLine key={`${line.text}-${i}`} tone="done" speaker="LIVE EVENT" text={line.text} />
@@ -236,12 +237,20 @@ export function Detail({
         </Panel>
       )}
 
+      {live && !v.origin && !v.counterparty && !isSolEscrow ? (
+        <Panel label="NFT SETTLEMENT">
+          <div style={{ padding: "var(--space-4)", color: "var(--text-muted)", fontSize: "var(--text-xs)" }}>
+            BOOST NFT LISTINGS SETTLE IN THE MARKETPLACE WHEN A BUYER PURCHASES THEM. THIS SOL ESCROW BUTTON DOES NOT APPLY.
+          </div>
+        </Panel>
+      ) : null}
+
       {/* A matched pair settles through its counterparty's wallet, driven by
           the deal worker. The manual button runs the one-sided escrow to a
           fallback payee, which for a matched order would pay the wrong
           person — so it is offered only while an order is still unpaired.
           A peer's mirrored order is not this device's to act on at all. */}
-      {live && !v.origin && !v.counterparty ? (
+      {live && !v.origin && !v.counterparty && isSolEscrow ? (
         <Button tone="primary" size="lg" block className="cm-touch" disabled={busy} onClick={settle}>
           {busy ? "SETTLING..." : "SETTLE INTENT"}
         </Button>
@@ -299,7 +308,7 @@ function Row({ label, value, wrap = false }: { label: string; value: string; wra
 }
 
 function SettlementLogLine({ text, tone }: { text: string; tone: string }) {
-  const isLlm = text.toUpperCase().includes("LLM");
+  const isLlm = text.toUpperCase().includes("LLM") || text.toUpperCase().includes("AGENT-0X123..2413");
   const thinking = isLlm && /ANALYSING|ANALYZING|THINKING/.test(text.toUpperCase());
   if (!isLlm) {
     return <span style={{ fontFamily: "var(--type-data-family)", fontSize: "var(--text-2xs)", color: tone === "error" ? "var(--text-alert)" : "var(--text-muted)" }}>&gt; {text}</span>;
@@ -308,8 +317,8 @@ function SettlementLogLine({ text, tone }: { text: string; tone: string }) {
     <div style={{ display: "grid", gridTemplateColumns: "auto minmax(0, 1fr)", gap: "var(--space-3)", alignItems: "start", padding: "var(--space-3) var(--space-4)", borderLeft: "var(--border-width-thick) solid var(--accent-cyan)", background: "linear-gradient(90deg, rgba(0,255,255,.12), transparent)" }}>
       <span aria-hidden="true" className={thinking ? "cm-pulse" : undefined} style={{ color: "var(--accent-cyan)", fontFamily: "var(--type-data-family)" }}>◆</span>
       <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-2)" }}>
-        <span style={{ fontFamily: "var(--type-label-family)", fontSize: "var(--text-2xs)", letterSpacing: "var(--tracking-widest)", color: "var(--accent-cyan)" }}>LOCAL LLM {thinking ? <span className="cm-blink">●●●</span> : "✓"}</span>
-        <span style={{ fontFamily: "var(--type-data-family)", fontSize: "var(--text-2xs)", color: "var(--text-primary)" }}>{text.replace(/^LOCAL LLM:\s*/i, "")}</span>
+        <span style={{ fontFamily: "var(--type-label-family)", fontSize: "var(--text-2xs)", letterSpacing: "var(--tracking-widest)", color: "var(--accent-cyan)" }}>AGENT-0X123..2413 {thinking ? <span className="cm-blink">●●●</span> : "✓"}</span>
+        <span style={{ fontFamily: "var(--type-data-family)", fontSize: "var(--text-2xs)", color: "var(--text-primary)" }}>{text.replace(/^(LOCAL LLM|AGENT-0X123\.\.2413):\s*/i, "")}</span>
       </div>
     </div>
   );

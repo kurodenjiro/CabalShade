@@ -87,8 +87,30 @@ pub async fn list_boost_nft(mint: String, price_lamports: String, state: State<'
 #[tauri::command]
 pub async fn buy_boost_nft(mint: String, seller: String, state: State<'_, AppState>) -> Result<String, AppError> {
     let services = state.services()?;
-    let result = services.bridge.lock().await.buy_boost_nft(&mint, &seller).await;
-    result.map_err(AppError::internal_msg)
+    let mesh = services.mesh.as_ref().ok_or(AppError::MeshOffline)?;
+    let queued = services
+        .bridge
+        .lock()
+        .await
+        .queue_buy_boost_nft(&mint, &seller)
+        .await
+        .map_err(AppError::internal_msg)?;
+    mesh.publish(crate::mesh::PrivacyIntent {
+        intent_type: "relay_tx".into(),
+        payload: serde_json::json!({
+            "type": "RelayTx",
+            "queue_id": queued.id,
+            "raw_tx_hex": queued.raw_tx_hex,
+            "summary": queued.summary,
+        })
+        .to_string(),
+        encrypted: false,
+        relay_path: vec!["boost_market_buyer".into()],
+        relay_fee: None,
+    })
+    .await
+    .map_err(|_| AppError::MeshOffline)?;
+    Ok(queued.id)
 }
 
 /// Stops delivery for a live stream.
@@ -667,13 +689,8 @@ pub async fn get_intent(
     let id = cabal_core::IntentId::new(id);
     let stored = store.get(&id).ok_or(AppError::Internal)?;
 
-    use cabal_core::Condition;
     let draft = &stored.draft;
-    let condition = match &draft.condition {
-        Condition::Under { price } => format!("UNDER {:.2} USDC", price.cents() as f64 / 100.0),
-        Condition::Above { price } => format!("ABOVE {:.2} USDC", price.cents() as f64 / 100.0),
-        Condition::Any => "ANY USDC PRICE".to_string(),
-    };
+    let condition = format_condition(&draft.asset, &draft.condition);
     let view = intent_view(stored, now_secs());
 
     // A mirrored order is the peer's side of the trade, so "you send" would be
@@ -793,10 +810,24 @@ fn parse_broadcast_draft(input: BroadcastDraftInput) -> Result<cabal_core::Inten
                 field: "price",
                 reason: InvalidReason::Missing,
             })?;
-            let price = UsdPrice::parse(&price).map_err(|_| AppError::InvalidIntent {
-                field: "price",
-                reason: InvalidReason::Malformed,
-            })?;
+            let price = if input.asset == "BOOST NFT" {
+                let lamports = TokenAmount::parse(&normalize_amount_input(&price), 9).map_err(|err| {
+                    let reason = match err {
+                        cabal_core::AmountError::TooManyDecimals { .. } => InvalidReason::TooPrecise,
+                        cabal_core::AmountError::Empty => InvalidReason::Missing,
+                        _ => InvalidReason::Malformed,
+                    };
+                    AppError::InvalidIntent { field: "price", reason }
+                })?;
+                let lamports = u64::try_from(lamports.raw()).map_err(|_| AppError::InvalidIntent {
+                    field: "price", reason: InvalidReason::OutOfRange,
+                })?;
+                UsdPrice::from_cents(lamports)
+            } else {
+                UsdPrice::parse(&price).map_err(|_| AppError::InvalidIntent {
+                    field: "price", reason: InvalidReason::Malformed,
+                })?
+            };
             if input.condition.kind == "under" {
                 Condition::Under { price }
             } else {
@@ -979,9 +1010,11 @@ pub async fn settle_intent(
         let store = services.intents.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let stored = store.get(&id).ok_or(AppError::Internal)?;
         if stored.draft.asset.as_ref() != "SOL" {
-            return Err(AppError::InvalidIntent {
-                field: "asset",
-                reason: crate::error::InvalidReason::Malformed,
+            // A boost is transferred by its marketplace instruction, not by
+            // the SOL escrow. Returning a feature-level error makes this a
+            // meaningful routing decision instead of blaming valid NFT data.
+            return Err(AppError::Unsupported {
+                feature: "boost NFT settlement uses the marketplace",
             });
         }
         stored.draft.amount.to_plain_string()
@@ -1053,7 +1086,16 @@ pub async fn settle_intent(
                 );
                 (lines, settled.queued_for_relay)
             })
-            .map_err(|error| format!("RPC UNREACHABLE. SIGNED + QUEUED FOR RELAY ({error})."));
+            .map_err(|error| {
+                let detail = error.to_string();
+                if detail.contains("insufficient lamports") {
+                    "CHAIN REJECTED — INSUFFICIENT SOL FOR ESCROW. REDUCE THE AMOUNT OR FUND THIS WALLET.".to_string()
+                } else if detail.contains("Transaction simulation failed") {
+                    format!("CHAIN REJECTED — TRANSACTION SIMULATION FAILED ({detail}).")
+                } else {
+                    format!("RPC UNREACHABLE. SIGNED + QUEUED FOR RELAY ({detail}).")
+                }
+            });
 
         match outcome {
             Ok((lines, queued_for_relay)) => {
@@ -1206,14 +1248,35 @@ fn explorer_url(proof: &str) -> Option<String> {
         .then(|| format!("https://explorer.solana.com/tx/{proof}?cluster=devnet"))
 }
 
-/// `95.00 USDC / SOL`.
-fn format_price(price: cabal_core::UsdPrice) -> String {
-    format!("{:.2} USDC / SOL", price.cents() as f64 / 100.0)
+/// Formats the internal fixed-point match price for the asset shown in UI.
+/// Boost listings use lamports (9 decimals); SOL/USDC intent prices retain the
+/// existing two-decimal display.
+fn format_price_for_asset(asset: &str, price: cabal_core::UsdPrice) -> String {
+    if asset == "BOOST NFT" {
+        format!("{:.9} SOL", price.cents() as f64 / 1_000_000_000.0)
+    } else {
+        format!("{:.2} USDC / SOL", price.cents() as f64 / 100.0)
+    }
+}
+
+fn format_condition(asset: &str, condition: &cabal_core::Condition) -> String {
+    let unit = if asset == "BOOST NFT" { "SOL" } else { "USDC" };
+    match condition {
+        cabal_core::Condition::Under { price } => {
+            if asset == "BOOST NFT" { format!("UNDER {:.9} SOL", price.cents() as f64 / 1_000_000_000.0) }
+            else { format!("UNDER {:.2} USDC", price.cents() as f64 / 100.0) }
+        }
+        cabal_core::Condition::Above { price } => {
+            if asset == "BOOST NFT" { format!("ABOVE {:.9} SOL", price.cents() as f64 / 1_000_000_000.0) }
+            else { format!("ABOVE {:.2} USDC", price.cents() as f64 / 100.0) }
+        }
+        cabal_core::Condition::Any => format!("ANY {unit} PRICE"),
+    }
 }
 
 /// Renders a stored intent as a list row.
 fn intent_view(intent: &cabal_core::StoredIntent, now: u64) -> IntentView {
-    use cabal_core::{Condition, ExecutionMode, IntentStatus};
+    use cabal_core::{ExecutionMode, IntentStatus};
 
     let draft = &intent.draft;
     let title = format!(
@@ -1221,11 +1284,7 @@ fn intent_view(intent: &cabal_core::StoredIntent, now: u64) -> IntentView {
         format!("{:?}", draft.action).to_uppercase(),
         draft.asset
     );
-    let subtitle = match &draft.condition {
-        Condition::Under { price } => format!("UNDER {:.2} USDC", price.cents() as f64 / 100.0),
-        Condition::Above { price } => format!("ABOVE {:.2} USDC", price.cents() as f64 / 100.0),
-        Condition::Any => "ANY USDC PRICE".to_string(),
-    };
+    let subtitle = format_condition(&draft.asset, &draft.condition);
     let badge = (draft.mode != ExecutionMode::Shark).then(|| draft.mode.label().to_string());
     let amount = format!("{} {}", draft.amount, draft.asset);
     let elapsed = match &intent.status {
@@ -1255,7 +1314,7 @@ fn intent_view(intent: &cabal_core::StoredIntent, now: u64) -> IntentView {
                 short_wallet(&m.wallet)
             }
         }),
-        price: intent.matched.as_ref().and_then(|m| m.price).map(format_price),
+        price: intent.matched.as_ref().and_then(|m| m.price).map(|price| format_price_for_asset(&draft.asset, price)),
         explorer: proof.as_deref().and_then(explorer_url),
         proof,
     }

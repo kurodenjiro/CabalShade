@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Button, IconButton, Panel } from "../ds";
 import type { VaultTab } from "../shell/screen";
@@ -28,6 +28,9 @@ const COMMAND: Record<VaultTab, string> = {
  */
 export function Vault({ tab, onTabChange }: { tab: VaultTab; onTabChange: (tab: VaultTab) => void }) {
   const [rows, setRows] = useState<VaultRow[] | null>(null);
+  const [syncing, setSyncing] = useState(false);
+  const [refreshToken, setRefreshToken] = useState(0);
+  const inFlight = useRef(false);
   const [revealed, setRevealed] = useState(false);
   const [total, setTotal] = useState<string | null>(null);
   const [story, setStory] = useState<string | null>(null);
@@ -39,25 +42,36 @@ export function Vault({ tab, onTabChange }: { tab: VaultTab; onTabChange: (tab: 
 
   useEffect(() => {
     let cancelled = false;
-    const refresh = () => invoke<VaultRow[]>(COMMAND[tab])
-      .then((next) => {
-        if (!cancelled) setRows(next);
-      })
-      .catch(() => {
-        if (!cancelled) setRows([]);
-      });
+    const refresh = () => {
+      // Devnet token indexing can take longer than the old five-second poll.
+      // One request at a time preserves the last verified rows instead of
+      // queuing mutex-bound RPC calls and briefly rendering an empty Vault.
+      if (inFlight.current) return;
+      inFlight.current = true;
+      if (!cancelled) setSyncing(true);
+      void invoke<VaultRow[]>(COMMAND[tab])
+        .then((next) => {
+          if (!cancelled) setRows(next);
+        })
+        .catch(() => {
+          // Cache-first: a failed background sync is not evidence the wallet
+          // is empty. Retain the last good result and retry later.
+        })
+        .finally(() => {
+          inFlight.current = false;
+          if (!cancelled) setSyncing(false);
+        });
+    };
     refresh();
     // Claim/use happens in the sibling marketplace panel. Its explicit event
     // refreshes this true Vault list immediately instead of waiting for the
     // user to leave and return to ASSETS.
     window.addEventListener("boost-inventory-updated", refresh);
-    const timer = window.setInterval(refresh, 5_000);
     return () => {
       cancelled = true;
       window.removeEventListener("boost-inventory-updated", refresh);
-      window.clearInterval(timer);
     };
-  }, [tab]);
+  }, [tab, refreshToken]);
 
   const toggleReveal = () => {
     const next = !revealed;
@@ -125,8 +139,9 @@ export function Vault({ tab, onTabChange }: { tab: VaultTab; onTabChange: (tab: 
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-6)", padding: "var(--space-6)" }}>
-      <div role="tablist" aria-label="Vault section" style={{ display: "flex", gap: "var(--space-7)" }}>
-        {TABS.map((name) => (
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "var(--space-4)" }}>
+        <div role="tablist" aria-label="Vault section" style={{ display: "flex", gap: "var(--space-7)" }}>
+          {TABS.map((name) => (
           <button
             key={name}
             type="button"
@@ -151,7 +166,11 @@ export function Vault({ tab, onTabChange }: { tab: VaultTab; onTabChange: (tab: 
           >
             {name}
           </button>
-        ))}
+          ))}
+        </div>
+        <Button tone="secondary" size="sm" className="cm-touch" disabled={syncing} onClick={() => setRefreshToken((value) => value + 1)}>
+          {syncing ? "SYNCING…" : "REFRESH"}
+        </Button>
       </div>
 
       {tab === "ASSETS" && (
@@ -192,6 +211,11 @@ export function Vault({ tab, onTabChange }: { tab: VaultTab; onTabChange: (tab: 
       )}
 
       <Panel label={tab}>
+        {syncing && rows !== null ? (
+          <div style={{ padding: "var(--space-3) var(--space-4)", borderBottom: "var(--border-hairline-style)", fontFamily: "var(--type-label-family)", fontSize: "var(--text-2xs)", letterSpacing: "var(--tracking-widest)", color: "var(--accent-cyan)" }}>
+            SYNCING DEVNET…
+          </div>
+        ) : null}
         {rows === null ? (
           <div style={{ padding: "var(--space-6)", color: "var(--text-muted)", fontFamily: "var(--type-label-family)", fontSize: "var(--text-2xs)", letterSpacing: "var(--tracking-widest)" }}>
             SYNCING ASSETS...

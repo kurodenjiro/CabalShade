@@ -260,23 +260,52 @@ pub fn spawn(ctx: DealContext, left: IntentId, right: IntentId) {
         if !roles.we_are_seller {
             ctx.say(&sides, "SETTLEMENT AGENT: AWAITING COUNTERPARTY ESCROW.");
             ctx.advance(&sides, &IntentStatus::Waiting);
-            return;
-        }
-
-        // The escrow program settles native SOL. Anything else has no
-        // settlement path yet, and saying so beats parking silently.
-        if roles.asset != "SOL" {
-            ctx.say(&sides, format!("SETTLEMENT AGENT: NO ESCROW ROUTE FOR {}.", roles.asset).as_str());
-            ctx.advance(&sides, &IntentStatus::Waiting);
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            let still_waiting = {
+                let store = ctx.lock();
+                sides.iter().all(|id| {
+                    store
+                        .get(id)
+                        .is_some_and(|intent| matches!(intent.status, IntentStatus::Waiting))
+                })
+            };
+            if still_waiting {
+                ctx.say(&sides, "ESCROW ERROR: COUNTERPARTY ESCROW NOT RECEIVED. INTENT CANCELLED.");
+                ctx.advance(&sides, &IntentStatus::Cancelled);
+            }
             return;
         }
 
         let price = negotiate(&ctx, &roles, &sides).await;
         let Some(price) = price else {
-            ctx.say(&sides, "LOCAL LLM: TERMS REJECTED. ORDERS REMAIN OPEN.");
+            ctx.say(&sides, "AGENT-0X123..2413: TERMS REJECTED. ORDERS REMAIN OPEN.");
             ctx.advance(&sides, &IntentStatus::Waiting);
             return;
         };
+
+        // Boost NFT intents still negotiate through the same local agent so
+        // both sides get a real matched price. Its final marketplace purchase
+        // needs a buyer-signed relay transaction (the seller can never sign
+        // away the buyer's SOL), so keep the agreed order waiting rather than
+        // sending it through the SOL escrow route.
+        if roles.asset != "SOL" {
+            ctx.say(&sides, "BOOST MARKET: TERMS AGREED. AWAITING BUYER-SIGNED RELAY PURCHASE.");
+            ctx.advance(&sides, &IntentStatus::Waiting);
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            let still_waiting = {
+                let store = ctx.lock();
+                sides.iter().all(|id| {
+                    store
+                        .get(id)
+                        .is_some_and(|intent| matches!(intent.status, IntentStatus::Waiting))
+                })
+            };
+            if still_waiting {
+                ctx.say(&sides, "ESCROW ERROR: BOOST PURCHASE RELAY NOT RECEIVED. INTENT CANCELLED.");
+                ctx.advance(&sides, &IntentStatus::Cancelled);
+            }
+            return;
+        }
 
         ctx.say(&sides, "MESH AGENTS: ROUTE LOCKED. SUBMITTING ESCROW…");
         ctx.advance(&sides, &IntentStatus::FindingRoute);
@@ -304,7 +333,7 @@ async fn negotiate(ctx: &DealContext, roles: &Roles, sides: &[&IntentId]) -> Opt
         )
     };
 
-    ctx.say(sides, "LOCAL LLM: ANALYSING TERMS…");
+    ctx.say(sides, "AGENT-0X123..2413: ANALYSING TERMS…");
     let proposal = tokio::time::timeout(
         std::time::Duration::from_secs(20),
         ctx.matcher.negotiate_trade(&seller_draft, &buyer_draft),
@@ -336,8 +365,8 @@ async fn negotiate(ctx: &DealContext, roles: &Roles, sides: &[&IntentId]) -> Opt
     ctx.say(
         sides,
         &price.map_or_else(
-            || "LOCAL LLM: TERMS ACCEPTED AT MARKET.".to_string(),
-            |p| format!("LOCAL LLM: TERMS ACCEPTED AT {:.2} USDC / SOL.", p.cents() as f64 / 100.0),
+            || "AGENT-0X123..2413: TERMS ACCEPTED AT MARKET.".to_string(),
+            |p| format!("AGENT-0X123..2413: TERMS ACCEPTED AT {:.2} USDC / SOL.", p.cents() as f64 / 100.0),
         ),
     );
     Some(price)

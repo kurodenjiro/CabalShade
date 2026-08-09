@@ -47,7 +47,7 @@ function App() {
         const status = detail.view.status.status;
         const text = status === "NEGOTIATING"
           ? detail.view.status.best
-            ? `LOCAL LLM DEAL · ${(Number(detail.view.status.best.cents) / 100).toFixed(2)} USDC`
+            ? `AGENT-0X123..2413 DEAL · ${(Number(detail.view.status.best.cents) / 100).toFixed(2)} USDC`
             : `MATCH FOUND · NEGOTIATING TERMS`
           : status === "FINDING_ROUTE"
             ? `DEAL ACCEPTED · SETTLING ${detail.view.title}`

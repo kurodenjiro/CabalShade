@@ -4,6 +4,12 @@ import { Button, Panel } from "../ds";
 import type { AssetOption, FormOptions } from "../types/bindings";
 import type { IntentId } from "../shell/screen";
 
+function errorText(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  try { return JSON.stringify(error); } catch { return "Unknown error"; }
+}
+
 /**
  * The compose screen.
  *
@@ -16,6 +22,7 @@ import type { IntentId } from "../shell/screen";
 export function New({ onBroadcast, onOpenMarketplace }: { onBroadcast: (id: IntentId) => void; onOpenMarketplace: () => void }) {
   const [options, setOptions] = useState<FormOptions | null>(null);
   const [action, setAction] = useState("BUY");
+  const [buyTarget, setBuyTarget] = useState<"SOL" | "NFT">("SOL");
   const [sellTarget, setSellTarget] = useState<"SOL" | "NFT">("SOL");
   const [asset, setAsset] = useState("SOL");
   const [condition, setCondition] = useState("Price under");
@@ -68,7 +75,7 @@ export function New({ onBroadcast, onOpenMarketplace }: { onBroadcast: (id: Inte
       });
       onBroadcast(id);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorText(err));
       setBusy(false);
     }
   };
@@ -82,14 +89,29 @@ export function New({ onBroadcast, onOpenMarketplace }: { onBroadcast: (id: Inte
         label="I WANT TO"
         values={options.actions}
         selected={action}
-        onSelect={setAction}
+        onSelect={(next) => {
+          setAction(next);
+          if (next === "BUY") setBuyTarget("SOL");
+        }}
       />
+
+      {action === "BUY" && (
+        <Field label="BUY TYPE">
+          <div style={{ display: "flex", gap: "var(--space-3)" }}>
+            <Pill selected={buyTarget === "SOL"} onClick={() => setBuyTarget("SOL")}>BUY SOL</Pill>
+            <Pill selected={buyTarget === "NFT"} onClick={() => { setBuyTarget("NFT"); setAsset("BOOST NFT"); setAmount("1"); setCondition("Price under"); setPrice("0.0001"); }}>BUY BOOST NFT</Pill>
+          </div>
+          <span style={{ color: "var(--text-muted)", fontSize: "var(--text-2xs)" }}>
+            {buyTarget === "SOL" ? "Broadcast a SOL buy intent through the mesh." : "Broadcast a buy intent. The matching agent negotiates against a seller's listed Boost NFT."}
+          </span>
+        </Field>
+      )}
 
       {action === "SELL" && (
         <Field label="SELL TYPE">
           <div style={{ display: "flex", gap: "var(--space-3)" }}>
             <Pill selected={sellTarget === "SOL"} onClick={() => { setSellTarget("SOL"); setAsset("SOL"); }}>SELL SOL</Pill>
-            <Pill selected={sellTarget === "NFT"} onClick={() => setSellTarget("NFT")}>SELL NFT</Pill>
+            <Pill selected={sellTarget === "NFT"} onClick={() => { setSellTarget("NFT"); setAsset("BOOST NFT"); setAmount("1"); }}>SELL NFT</Pill>
           </div>
           <span style={{ color: "var(--text-muted)", fontSize: "var(--text-2xs)" }}>
             {sellTarget === "SOL" ? "Broadcast a SOL sell intent through the mesh." : "Open the SPL boost NFT marketplace to list an item."}
@@ -100,7 +122,9 @@ export function New({ onBroadcast, onOpenMarketplace }: { onBroadcast: (id: Inte
       {/* ASSET */}
       <Field label="ASSET">
         <div style={{ display: "flex", gap: "var(--space-3)", flexWrap: "wrap" }}>
-          {options.assets.map((a: AssetOption) => (
+          {(action === "BUY" && buyTarget === "NFT") || (action === "SELL" && sellTarget === "NFT") ? (
+            <Pill selected onClick={() => setAsset("BOOST NFT")}>BOOST NFT</Pill>
+          ) : options.assets.map((a: AssetOption) => (
             <Pill key={a.name} selected={asset === a.name} onClick={() => setAsset(a.name)}>
               {a.name}
             </Pill>
@@ -121,7 +145,7 @@ export function New({ onBroadcast, onOpenMarketplace }: { onBroadcast: (id: Inte
           <input
             className="cm-input cm-touch"
             inputMode="decimal"
-            placeholder="Price (USDC)"
+            placeholder={asset === "BOOST NFT" ? "Price (SOL), e.g. 0.0001" : "Price (USDC)"}
             value={price}
             onChange={(e) => setPrice(e.target.value)}
             style={{ marginTop: "var(--space-4)", width: "100%" }}
@@ -133,8 +157,8 @@ export function New({ onBroadcast, onOpenMarketplace }: { onBroadcast: (id: Inte
       <Field label="AMOUNT">
         <input
           className="cm-input cm-touch"
-          inputMode="decimal"
-          placeholder={`Amount in ${asset}`}
+          inputMode={asset === "BOOST NFT" ? "numeric" : "decimal"}
+          placeholder={asset === "BOOST NFT" ? "Number of NFTs (e.g. 1)" : `Amount in ${asset}`}
           value={amount}
           onChange={(e) => setAmount(e.target.value)}
           style={{ width: "100%" }}
@@ -161,7 +185,7 @@ export function New({ onBroadcast, onOpenMarketplace }: { onBroadcast: (id: Inte
       )}
 
       <Button tone="primary" size="lg" block className="cm-touch" disabled={busy} onClick={confirm}>
-        {busy ? "BROADCASTING..." : action === "SELL" && sellTarget === "NFT" ? "OPEN NFT MARKETPLACE" : action === "SELL" ? "BROADCAST SELL SOL" : "BROADCAST BUY INTENT"}
+        {busy ? "BROADCASTING..." : action === "BUY" && buyTarget === "NFT" ? "BROADCAST BUY BOOST NFT" : action === "SELL" && sellTarget === "NFT" ? "OPEN NFT MARKETPLACE" : action === "SELL" ? "BROADCAST SELL SOL" : "BROADCAST BUY INTENT"}
       </Button>
     </div>
   );

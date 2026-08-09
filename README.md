@@ -155,7 +155,6 @@ CabalShade/
 │   └── tests/                    # IPC contract + lifecycle tests
 ├── anchor-escrow/                # Solana Anchor escrow program
 │   └── programs/cabal-escrow/    # Escrow + MagicBlock Ephemeral Rollup
-├── contracts/                    # Legacy Solidity contracts (Hardhat)
 ├── noir-circuit/                 # Noir ZK circuits
 │   └── src/main.nr               # Bid verification circuit
 └── docs/                         # Mobile architecture & research docs
@@ -178,9 +177,7 @@ Nodes prove honesty via zero-knowledge without revealing interaction history.
 ### Solana asset settlement
 
 The mesh envelope carries the counterparty's public Solana receiving wallet;
-private keys never leave the encrypted local vault. The former Avalanche ERC-721
-voucher and marketplace artifacts have been removed; boost NFTs use the
-dedicated Solana `cabal_boost` program above.
+private keys never leave the encrypted local vault.
 
 ## 🧪 Testing
 
@@ -207,13 +204,6 @@ cd anchor-escrow
 cargo test       # Rust program tests
 ```
 
-### Legacy Solidity Contracts
-
-```bash
-cd contracts
-npx hardhat test   # Runs against Hardhat's in-memory network, no real funds
-```
-
 ### Multi-Node Mesh Test
 
 1. Run two instances on different network interfaces
@@ -228,7 +218,7 @@ npx hardhat test   # Runs against Hardhat's in-memory network, no real funds
 | **Physical** | libp2p + mDNS | Hide IP/location |
 | **Negotiation** | Ollama + FHE | Protect strategy |
 | **Verification** | Noir ZK | Prove without revealing |
-| **Settlement** | On-chain Escrow (Solana) | Trustless deal settlement |
+| **Settlement** | Atomic SOL ↔ Circle USDC escrow (Solana) | Trustless two-sided settlement |
 
 ## 📦 Dependencies
 
@@ -247,7 +237,6 @@ npx hardhat test   # Runs against Hardhat's in-memory network, no real funds
 
 ### Contracts
 - `anchor-lang` + `ephemeral-rollups-sdk` - Solana escrow program
-- `hardhat` + `@nomicfoundation/hardhat-toolbox` - Legacy Solidity suite
 
 ## 🎯 Use Cases
 

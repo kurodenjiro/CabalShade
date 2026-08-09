@@ -604,6 +604,40 @@ impl BlockchainBridge {
         self.send_boost_instruction(instruction, "Buy boost NFT via mesh").await
     }
 
+    /// Signs a Boost marketplace purchase locally and places it in the relay
+    /// queue. The mesh peer submits these exact bytes; it cannot alter the
+    /// buyer, seller, price or NFT destination.
+    pub async fn queue_buy_boost_nft(&self, mint_text: &str, seller_text: &str) -> Result<QueuedTx, String> {
+        let mint = Pubkey::from_str(mint_text).map_err(|e| e.to_string())?;
+        let seller = Pubkey::from_str(seller_text).map_err(|e| e.to_string())?;
+        let keypair = self.primary_keypair().map_err(|e| e.to_string())?;
+        let token_program = Pubkey::from_str(SPL_TOKEN_PROGRAM_ID).map_err(|e| e.to_string())?;
+        let listing = self.listing_pda(&seller, &mint);
+        let vault_tokens = Self::associated_token_address(&listing, &mint);
+        let buyer_tokens = Self::associated_token_address(&keypair.pubkey(), &mint);
+        let instruction = Instruction {
+            program_id: self.boost_program_id(),
+            accounts: vec![
+                solana_sdk::instruction::AccountMeta::new(listing, false),
+                solana_sdk::instruction::AccountMeta::new_readonly(mint, false),
+                solana_sdk::instruction::AccountMeta::new(vault_tokens, false),
+                solana_sdk::instruction::AccountMeta::new(buyer_tokens, false),
+                solana_sdk::instruction::AccountMeta::new(seller, false),
+                solana_sdk::instruction::AccountMeta::new(keypair.pubkey(), true),
+                solana_sdk::instruction::AccountMeta::new_readonly(token_program, false),
+                solana_sdk::instruction::AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
+            ],
+            data: anchor_discriminator("buy_boost").to_vec(),
+        };
+
+        // Prefer a fresh blockhash when the buyer can reach devnet, but retain
+        // the last verified one for an actually offline signing flow.
+        let _ = self.refresh_chain_cache().await;
+        self.sign_offline(instruction, "Buy boost NFT via mesh relay")
+            .await
+            .map_err(|e| e.to_string())
+    }
+
     pub async fn list_boost_nfts(&self) -> Result<Vec<BoostNftRecord>, String> {
         let client = self.rpc_client();
         let program = self.boost_program_id();

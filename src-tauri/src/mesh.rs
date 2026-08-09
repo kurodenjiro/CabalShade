@@ -369,7 +369,12 @@ impl MeshNetwork {
                 relay: relay_behaviour,
                 dcutr: dcutr::Behaviour::new(key.public().to_peer_id()),
             })?
-            .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
+            // A mesh peer is useful while the user is deciding whether to
+            // trade, not only while bytes happen to be in flight. Sixty
+            // seconds made an otherwise healthy two-node demo disappear from
+            // the map between actions. Ping maintains the connection; this is
+            // only the last-resort timeout for genuinely dead transports.
+            .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(15 * 60)))
             .build();
 
         Ok(MeshNetwork {
@@ -489,9 +494,18 @@ impl MeshNetwork {
                             self.peers.connected(peer_id, transport);
                             tracing::info!(peer_id = %peer_id, ?transport, "connection established");
                         }
-                        SwarmEvent::ConnectionClosed { peer_id, .. } => {
-                            self.peers.disconnected(&peer_id);
-                            tracing::info!(peer_id = %peer_id, "connection closed");
+                        SwarmEvent::ConnectionClosed { peer_id, num_established, .. } => {
+                            // libp2p may temporarily have parallel direct and
+                            // relayed connections to one peer. Do not make the
+                            // node vanish from the UI merely because one of
+                            // those paths closed; remove it only after the
+                            // final connection is gone.
+                            if num_established == 0 {
+                                self.peers.disconnected(&peer_id);
+                                tracing::info!(peer_id = %peer_id, "last connection closed");
+                            } else {
+                                tracing::debug!(peer_id = %peer_id, num_established, "connection closed; peer remains reachable");
+                            }
                         }
                         SwarmEvent::Behaviour(event) => match event {
                             MeshBehaviourEvent::Ping(ping_event) => {

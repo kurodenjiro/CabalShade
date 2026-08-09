@@ -4,11 +4,6 @@ import { Button, Panel } from "../ds";
 import type { BoostNft } from "../boosts";
 import { boostExpired, boostLabel } from "../boosts";
 
-const formatLamportsToSol = (lamports: string): string => {
-  const value = Number(lamports);
-  return Number.isFinite(value) ? (value / 1_000_000_000).toFixed(4) : "0.0000";
-};
-
 const errorText = (error: unknown): string => {
   if (error instanceof Error) return error.message;
   if (typeof error === "string") return error;
@@ -54,8 +49,6 @@ export function BoostMarketplace() {
 
   useEffect(() => {
     refresh();
-    const timer = window.setInterval(refresh, 5_000);
-    return () => window.clearInterval(timer);
   }, []);
 
   const useBoost = async (mint: string) => {
@@ -79,7 +72,9 @@ export function BoostMarketplace() {
     setBusy(mint);
     setMessage(null);
     try {
-      await invoke("list_boost_nft", { mint, priceLamports: "10000000" });
+      // Demo listing price: 0.0001 SOL, matching the Buy Boost intent's
+      // default ceiling and preserving nine-decimal SOL precision.
+      await invoke("list_boost_nft", { mint, priceLamports: "100000" });
       const id = await invoke<string>("broadcast_intent", {
         draft: {
           action: "SELL",
@@ -99,33 +94,19 @@ export function BoostMarketplace() {
     }
   };
 
-  const buyBoost = async (item: BoostNft) => {
-    if (!item.seller) return;
-    setBusy(item.mint);
-    setMessage(null);
-    try {
-      await invoke("buy_boost_nft", { mint: item.mint, seller: item.seller });
-      setMessage("BOOST PURCHASE CONFIRMED ON SOLANA.");
-      refresh();
-    } catch (error) {
-      setMessage(`PURCHASE FAILED — ${errorText(error).slice(0, 180)}`);
-    } finally {
-      setBusy(null);
-    }
-  };
-
   return (
     <Panel label="SPL BOOST NFT / MESH MARKET">
       <div style={{ display: "flex", flexDirection: "column" }}>
         <div style={{ padding: "var(--space-5) var(--space-6)", color: "var(--text-muted)", fontSize: "var(--text-sm)" }}>
-          Only boost items are tradeable. Using one burns the SPL NFT; inventory syncs automatically every 5 seconds.
+          Only boost items are tradeable. Using one burns the SPL NFT. Sellers list through the mesh; buyers purchase a listed item here.
         </div>
         <div style={{ padding: "0 var(--space-6) var(--space-5)", display: "flex", gap: "var(--space-3)" }}>
           <Button tone="secondary" size="sm" className="cm-touch" disabled={busy === "demo"} onClick={claimDemo}>CLAIM DEMO BOOST</Button>
+          <Button tone="secondary" size="sm" className="cm-touch" disabled={busy !== null} onClick={refresh}>REFRESH MARKET</Button>
         </div>
         {items === null ? null : items.length === 0 ? (
           <div style={{ padding: "var(--space-8) var(--space-6)", textAlign: "center", color: "var(--text-muted)" }}>
-            NO BOOST NFTS DETECTED.
+            NO BOOST NFTS DETECTED. ASK THE OTHER PEER TO SELL VIA MESH, THEN REFRESH MARKET.
           </div>
         ) : items.map((item) => {
           const expired = boostExpired(item);
@@ -138,7 +119,7 @@ export function BoostMarketplace() {
               {item.owned && !item.listed && !expired && <Button tone="primary" size="sm" className="cm-touch" disabled={busy === item.mint} onClick={() => useBoost(item.mint)}>BURN</Button>}
               {item.owned && !item.listed && !expired && <Button tone="secondary" size="sm" className="cm-touch" disabled={busy === item.mint} onClick={() => listBoost(item.mint)}>SELL VIA MESH</Button>}
               {item.listed && <span style={{ fontSize: "var(--text-2xs)", color: "var(--text-muted)" }}>LISTED</span>}
-              {!item.owned && item.listed && <Button tone="primary" size="sm" className="cm-touch" disabled={busy === item.mint} onClick={() => buyBoost(item)}>BUY {item.priceLamports ? `${formatLamportsToSol(item.priceLamports)} SOL` : "BOOST"}</Button>}
+              {!item.owned && item.listed && <span style={{ fontSize: "var(--text-2xs)", color: "var(--accent-cyan)" }}>LISTED · MATCH VIA BUY INTENT</span>}
             </div>
           );
         })}
